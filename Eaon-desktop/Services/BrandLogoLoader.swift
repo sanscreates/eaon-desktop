@@ -2,7 +2,7 @@ import AppKit
 
 enum BrandLogoLoader {
     private static let bundle: Bundle = {
-        if let url = Bundle.main.url(forResource: "AquaChat_AquaChat", withExtension: "bundle"),
+        if let url = Bundle.main.url(forResource: "Eaon-desktop_Eaon-desktop", withExtension: "bundle"),
            let resourceBundle = Bundle(url: url) {
             return resourceBundle
         }

@@ -1,10 +1,10 @@
-# How AquaChat updates work, and how to ship one
+# How Eaon updates work, and how to ship one
 
 ## How it works
 
 - On every launch, the app fetches one small JSON file (the **update
   manifest**) from `UpdateChecker.manifestURL`
-  (`AquaChat/Services/UpdateChecker.swift`).
+  (`Eaon-desktop/Services/UpdateChecker.swift`).
 - If the manifest's `latestVersion` is newer than the app's own
   `AppVersion.current`, the "New Version" card appears (bottom-right) with
   **Show Release Notes / Remind Me Later / Update Now**.
@@ -43,7 +43,7 @@ server-side, just one JSON edit plus one file upload.
 ## Known limits (deliberate, for now)
 
 - The updater **downloads and opens** the new release; it does not silently
-  replace the running app. Self-replacement is only safe once AquaChat
+  replace the running app. Self-replacement is only safe once Eaon
   ships as a signed `.app` bundle — at that point, adopt
   [Sparkle](https://sparkle-project.org) (the standard macOS update
   framework: signed appcasts, atomic install, auto-relaunch) rather than

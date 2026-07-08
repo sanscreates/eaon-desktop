@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "AquaChat",
+    name: "Eaon-desktop",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "AquaChat", targets: ["AquaChat"])
+        .executable(name: "Eaon-desktop", targets: ["Eaon-desktop"])
     ],
     targets: [
         .executableTarget(
-            name: "AquaChat",
-            path: "AquaChat",
+            name: "Eaon-desktop",
+            path: "Eaon-desktop",
             resources: [
                 .process("Resources")
             ]

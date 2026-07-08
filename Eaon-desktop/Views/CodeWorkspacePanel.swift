@@ -495,7 +495,7 @@ struct CodeWorkspacePanel: View {
         guard let entry = htmlEntryFile else { return }
         let key = viewModel.currentConversationId?.uuidString ?? "draft"
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AquaChatPreview", isDirectory: true)
+            .appendingPathComponent("EaonDesktopPreview", isDirectory: true)
             .appendingPathComponent(key, isDirectory: true)
 
         do {

@@ -76,7 +76,7 @@ final class WorkspaceRunner {
         teardownQuietly()
 
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AquaChatRun", isDirectory: true)
+            .appendingPathComponent("EaonDesktopRun", isDirectory: true)
             .appendingPathComponent(workspaceKey, isDirectory: true)
 
         chunks = []
