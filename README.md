@@ -1,0 +1,50 @@
+# Eaon
+
+A native macOS chat client, built with SwiftUI. Talk to [Eaon](https://eaon.dev)'s
+hosted models, bring your own API key for any OpenAI-compatible/Anthropic/Gemini
+provider, or run models entirely on-device with Ollama, llama.cpp, or MLX —
+all from the same app, with no account required for the local-only path.
+
+## Highlights
+
+- **Multi-provider chat** — Eaon's hosted catalog, BYOK cloud providers, and
+  local models, with automatic routing based on which model you pick.
+- **Local models** — discover and run GGUF/MLX models via Ollama, llama.cpp,
+  or Apple's MLX framework, with live hardware-fit checks before you download
+  anything.
+- **Plugins** — connect real accounts (GitHub, Slack, Notion, Linear, and
+  more) and let a model call their tools directly, with native tool-calling
+  and a confirmation step before anything runs.
+- **Image generation** — over an API or a local server (Automatic1111-style,
+  or an Ollama-served diffusion model).
+- **Computer Control** — optional, off by default — let a model organize
+  files or run shell commands on this Mac, with safety rules and
+  confirmation built in.
+- **Local API Server** — run Eaon itself as a local, OpenAI-compatible
+  server other tools can point at.
+- **Memory** — Eaon can learn durable facts about you across conversations,
+  entirely on-device.
+
+## Building
+
+Requires Xcode 15+ / Swift 5.9+ and macOS 14+.
+
+```sh
+swift build
+./run.sh            # builds and launches for local development
+```
+
+To produce a distributable universal build (arm64 + x86_64), see
+`build-installer.sh` and `RELEASING-UPDATES.md`.
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how
+to get set up and what to expect from a PR.
+
+## License
+
+[PolyForm Shield 1.0.0](LICENSE.md) — you're free to use, modify, and
+distribute this software for any purpose, including commercially, with one
+restriction: you can't use it to build a competing product. See
+[LICENSE.md](LICENSE.md) for the exact terms.
