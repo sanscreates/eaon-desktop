@@ -303,9 +303,9 @@ struct SidebarView: View {
 // MARK: - Aqua brand mark
 
 /// A peak rising from a wave — reads as both "A" and water, echoing the
-/// swell photography and angular wordmark on aquadevs.com. Deliberately
-/// simple: at the 18–30px sizes this renders in, fine letterform detail
-/// (e.g. a literal crossbar) would just turn to mud.
+/// swell photography and angular wordmark of the backend's own branding.
+/// Deliberately simple: at the 18–30px sizes this renders in, fine
+/// letterform detail (e.g. a literal crossbar) would just turn to mud.
 struct AquaGlyph: Shape {
     func path(in rect: CGRect) -> Path {
         let w = rect.width, h = rect.height
@@ -338,10 +338,9 @@ struct AquaMark: View {
     }
 }
 
-/// The app's own wordmark — "Eaon," the product name. Distinct from "Aqua
-/// Devs," the company/backend brand (Aqua API, aquadevs.com), which is
-/// unchanged — same relationship as "ChatGPT" the product vs "OpenAI" the
-/// company.
+/// The app's own wordmark — "Eaon," the product name. Distinct from the
+/// backend/company brand (the Aqua API), which is unchanged — same
+/// relationship as "ChatGPT" the product vs "OpenAI" the company.
 struct AquaWordmark: View {
     var size: CGFloat = 16
     @Environment(\.themeColors) private var colors

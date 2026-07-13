@@ -474,6 +474,9 @@ class ChatViewModel {
         // Before anything reads a default: pull data stranded in an old
         // process-name/bundle-id domain (see LegacyDefaultsMigrator).
         LegacyDefaultsMigrator.migrateIfNeeded()
+        // Carries a key saved under the old "aquadevs-api-key" account name
+        // forward — see APIKeyStore's own doc comment.
+        APIKeyStore.migrateLegacyAccountNameIfNeeded()
         if let saved = UserDefaults.standard.string(forKey: Self.selectedModelKey) {
             selectedModel = saved
         }

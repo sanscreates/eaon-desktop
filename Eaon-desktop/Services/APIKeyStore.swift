@@ -14,7 +14,22 @@ import Foundation
 /// uses for everything else — has no such prompt, ever.
 enum APIKeyStore {
     private static let defaults = UserDefaults.standard
-    private static let primaryAccount = "aquadevs-api-key"
+    private static let primaryAccount = "eaon-api-key"
+    private static let legacyPrimaryAccount = "aquadevs-api-key"
+    private static let legacyAccountMigrationDoneKey = "legacy_api_key_account_migration_done_v1"
+
+    /// One-shot: carries a key already saved under the old account name
+    /// forward to the new one, now that the storage key itself no longer
+    /// mentions "aquadevs" — copies rather than deletes the old value, so
+    /// running this more than once (or a downgrade) can't lose a key.
+    static func migrateLegacyAccountNameIfNeeded() {
+        guard !defaults.bool(forKey: legacyAccountMigrationDoneKey) else { return }
+        defer { defaults.set(true, forKey: legacyAccountMigrationDoneKey) }
+
+        guard loadAPIKey(forAccount: primaryAccount) == nil,
+              let legacyValue = loadAPIKey(forAccount: legacyPrimaryAccount) else { return }
+        try? saveAPIKey(legacyValue, forAccount: primaryAccount)
+    }
 
     static func saveAPIKey(_ key: String) throws {
         try saveAPIKey(key, forAccount: primaryAccount)

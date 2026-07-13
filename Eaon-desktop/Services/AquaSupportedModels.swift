@@ -1,8 +1,8 @@
 import Foundation
 
 enum AquaSupportedModels {
-    /// Chat models supported by Aqua (https://api.aquadevs.com/v1), kept in
-    /// sync with what the live `/v1/models` endpoint actually returns.
+    /// Chat models supported by Aqua's hosted API (see `AquaAPI.baseURL`),
+    /// kept in sync with what the live `/v1/models` endpoint actually returns.
     /// Non-chat entries from the API (image, audio, etc.) are excluded.
     private static let catalog: [String: String] = [
         "agnes": "Agnes 2.0 Flash",
