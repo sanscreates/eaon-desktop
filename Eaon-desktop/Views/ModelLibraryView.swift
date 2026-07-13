@@ -490,6 +490,9 @@ struct ModelLibraryView: View {
                         Text(model.name)
                             .font(AppFont.mono(13, weight: .semibold))
                             .foregroundColor(colors.textPrimary)
+                        if model.isNew {
+                            NewModelBadge()
+                        }
                         Text(model.approxSize)
                             .font(AppFont.mono(10.5))
                             .foregroundColor(colors.textTertiary)
@@ -1009,6 +1012,22 @@ struct ModelLibraryView: View {
                 }
             }
             .frame(width: size, height: size)
+        }
+    }
+
+    /// A small, impossible-to-miss flag for a genuinely current release
+    /// (`CuratedOllamaModel.isNew`) — real freshness has to be visible at a
+    /// glance in a list of 140+ models spanning years of releases, not just
+    /// true in the data. Solid fill (not the app's usual outline-chip
+    /// style) so it reads as a flag, not just more label text.
+    private struct NewModelBadge: View {
+        var body: some View {
+            Text("NEW")
+                .font(AppFont.mono(9, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color(hex: "#22C55E")))
         }
     }
 

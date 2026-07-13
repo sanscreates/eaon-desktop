@@ -174,6 +174,10 @@ enum CuratedOllamaCatalog {
             /// `LocalAIManager.CuratedOllamaModel.brand`'s own doc comment.
             let brand: String?
             let category: String
+            /// Absent on most entries — defaults to `false` on decode, so
+            /// existing entries don't all need touching just to add this
+            /// field.
+            let isNew: Bool?
         }
         let categoryOrder: [String]
         let models: [Entry]
@@ -233,7 +237,8 @@ enum CuratedOllamaCatalog {
                 approxSize: entry.approxSize,
                 sizeBytes: entry.sizeBytes,
                 brand: brand,
-                category: entry.category
+                category: entry.category,
+                isNew: entry.isNew ?? false
             )
         }
 
@@ -1083,6 +1088,13 @@ final class LocalAIManager {
         /// with a neutral icon rather than misattributed to anyone.
         let brand: ProviderBrand?
         let category: String
+        /// True for a genuinely current release (checked against the live
+        /// Ollama registry, not just "hasn't been removed yet") — drives a
+        /// small "New" badge in the picker so a recent model is visibly
+        /// distinct from the long tail of older ones sitting in the same
+        /// list, instead of something only recognizable if you already know
+        /// which release dates are current.
+        let isNew: Bool
         var id: String { name }
     }
 

@@ -120,6 +120,16 @@ class ChatViewModel {
     var messages: [ChatMessage] = []
     var inputText: String = ""
     var selectedModel: String = ""
+    /// The active top-level mode (Chat / Agent / Eaon Claw / Image Studio) —
+    /// drives which tools and teaching blocks the model gets and how long the
+    /// agent loop may run (see `mergedNativeTools`, `systemPromptHistory`,
+    /// `maxAgentSteps`). Persisted so the app reopens in the same mode.
+    var currentMode: EaonMode = .chat {
+        didSet {
+            guard currentMode != oldValue else { return }
+            UserDefaults.standard.set(currentMode.rawValue, forKey: Self.currentModeKey)
+        }
+    }
     var availableModels: [APIModel] = []
     /// Aqua's hosted image-generation models — fetched separately from
     /// `availableModels` because `AquaSupportedModels` (behind
@@ -314,8 +324,12 @@ class ChatViewModel {
     /// with the next request so the agent can fix its own website bugs.
     private(set) var pendingPreviewErrors: [String] = []
     /// Hard cap on agent-loop rounds per user message — prevents a runaway
-    /// tool loop from re-posting the conversation forever.
-    private static let maxAgentSteps = 16
+    /// tool loop from re-posting the conversation forever. Eaon Claw gets a
+    /// much larger budget: real on-device tasks ("sort my Downloads,"
+    /// "research this and open the top three results") legitimately take many
+    /// steps, where a coding or chat turn rarely needs more than a handful.
+    /// Both are still bounded — the user can also stop generation at any time.
+    private var maxAgentSteps: Int { currentMode == .claw ? 40 : 16 }
 
     // MARK: - Run confirmation (agent code execution is unsandboxed — see WorkspaceRunner)
 
@@ -456,6 +470,7 @@ class ChatViewModel {
     private let apiService = AquaAPIService()
     private static let selectedModelKey = "selected_model_id"
     private static let customInstructionsKey = "custom_instructions"
+    private static let currentModeKey = "eaon_current_mode"
     private var typewriter: TypewriterStreamController?
     private var generationTask: Task<Void, Never>?
 
@@ -479,6 +494,10 @@ class ChatViewModel {
         APIKeyStore.migrateLegacyAccountNameIfNeeded()
         if let saved = UserDefaults.standard.string(forKey: Self.selectedModelKey) {
             selectedModel = saved
+        }
+        if let savedMode = UserDefaults.standard.string(forKey: Self.currentModeKey),
+           let mode = EaonMode(rawValue: savedMode) {
+            currentMode = mode
         }
         customInstructions = UserDefaults.standard.string(forKey: Self.customInstructionsKey) ?? ""
         loadConversations()
@@ -853,6 +872,33 @@ class ChatViewModel {
         refreshContextLimit()
     }
 
+    /// Switches mode from the sidebar. Image Studio needs an image model
+    /// selected to work, so entering it auto-selects the first available one
+    /// when the current pick is a chat model (and vice-versa on the way out),
+    /// sparing the user from having to know to change the model too.
+    func enterMode(_ mode: EaonMode) {
+        currentMode = mode
+        switch mode {
+        case .imageStudio:
+            let isImage = imageModels.contains { $0.id == selectedModel }
+            if !isImage, let first = imageModels.first {
+                selectModel(first.id)
+            }
+        case .chat, .agent, .claw:
+            // Leaving Image Studio with an image model still selected would
+            // leave the conversational modes unable to send — snap back to a
+            // chat model.
+            let isImage = imageModels.contains { $0.id == selectedModel }
+            if isImage, let first = chatModels.first {
+                selectModel(first.id)
+            }
+        }
+    }
+
+    /// Whether any image model is configured — Image Studio shows setup
+    /// guidance instead of a dead model picker when this is false.
+    var hasImageModels: Bool { !imageModels.isEmpty }
+
     /// The active model's context limit — nil while unknown (an
     /// unrecognized cloud model, or a local one that hasn't reported yet),
     /// in which case the UI simply shows no indicator rather than a guess.
@@ -1110,7 +1156,8 @@ class ChatViewModel {
         var identicalFailureStreak = 0
         var lastFailureSignature: String?
 
-        for step in 1...Self.maxAgentSteps {
+        let stepBudget = maxAgentSteps
+        for step in 1...stepBudget {
             let outcome = await streamOneAgentStep(customConfig: customConfig, localRecord: localRecord, apiKey: apiKey)
             guard case .completed(let stepMsgId, let replyText) = outcome, !Task.isCancelled else { break }
 
@@ -1154,8 +1201,8 @@ class ChatViewModel {
             }
 
             if Task.isCancelled { break }
-            if step == Self.maxAgentSteps {
-                WorkspaceRunner.shared.note("● Agent paused after \(Self.maxAgentSteps) rounds — send a message to continue.\n", kind: .status)
+            if step == stepBudget {
+                WorkspaceRunner.shared.note("● Agent paused after \(stepBudget) rounds — send a message to continue.\n", kind: .status)
             }
         }
 
@@ -1281,17 +1328,29 @@ class ChatViewModel {
     /// entry in `nameMap`: `ToolCallAccumulator.fencedBlocks` recognizes
     /// `WebSearchTool.nativeFunctionName` on its own, before it ever
     /// consults the map (see that function's doc comment).
-    private static func mergedNativeTools() -> NativeToolConfig? {
-        let mcpConfig = MCPConnectionStore.shared.nativeToolConfig
-        var tools = mcpConfig?.tools ?? []
+    private static func mergedNativeTools(mode: EaonMode) -> NativeToolConfig? {
+        let inClaw = mode == .claw && DesktopControlStore.shared.isEnabled
+        var tools: [[String: Any]] = []
+        var nameMap: [String: (server: String, tool: String)] = [:]
+        // Cloud plugins belong to Chat/Agent, not Eaon Claw — see
+        // `systemPromptHistory` for why loading them in Claw made a weaker
+        // model lose track of its device tools entirely.
+        if !inClaw, let mcpConfig = MCPConnectionStore.shared.nativeToolConfig {
+            tools += mcpConfig.tools
+            nameMap = mcpConfig.nameMap
+        }
         if WebSearchStore.shared.isEnabled {
             tools.append(WebSearchTool.nativeDefinition)
         }
-        if DesktopControlStore.shared.isEnabled {
+        // Device-control tools are exclusive to Eaon Claw — the mode whose
+        // whole purpose is driving this Mac. Even with the capability
+        // enabled in Settings, they're never offered in Chat/Agent, so those
+        // modes can't reach outside their lane.
+        if inClaw {
             tools.append(contentsOf: DesktopControlTool.nativeDefinitions)
         }
         guard !tools.isEmpty else { return nil }
-        return NativeToolConfig(tools: tools, nameMap: mcpConfig?.nameMap ?? [:])
+        return NativeToolConfig(tools: tools, nameMap: nameMap)
     }
 
     /// Streams one assistant reply (one loop step) into its own chat bubble,
@@ -1323,7 +1382,8 @@ class ChatViewModel {
         // Connected plugins + web search (if enabled) ride along as native
         // API tools (the calling mechanism hosted models are trained on) —
         // nil when neither is present, so plain chat requests are untouched.
-        let nativeTools = Self.mergedNativeTools()
+        // Desktop tools are added only in Eaon Claw (see mergedNativeTools).
+        let nativeTools = Self.mergedNativeTools(mode: currentMode)
 
         var outcome: AgentStepOutcome
         do {
@@ -1600,11 +1660,13 @@ class ChatViewModel {
 
             case .computerCall(let toolName, let argumentsJSON):
                 // Same belt-and-suspenders as web search: the teaching block
-                // and native definitions are withheld when off, but a model
-                // can still imitate the fence from history — refuse rather
-                // than act after the user turned this off.
-                guard DesktopControlStore.shared.isEnabled else {
-                    sections.append("### computer\nERROR: Computer Control is turned off (Settings → Computer Control) — nothing was done.")
+                // and native definitions are withheld outside Eaon Claw, but
+                // a model can still imitate the fence from history — refuse
+                // rather than act. Device control requires BOTH the mode
+                // (Eaon Claw) and the capability being enabled, so a computer
+                // call replayed while the user is in Chat/Agent can't fire.
+                guard currentMode == .claw, DesktopControlStore.shared.isEnabled else {
+                    sections.append("### computer\nERROR: device control only runs in Eaon Claw, and only once it's enabled — nothing was done.")
                     continue
                 }
                 guard let toolName else {
@@ -1657,6 +1719,15 @@ class ChatViewModel {
     /// itself learned from them — never a hardcoded system prompt.
     private var systemPromptHistory: [HistoryTurn] {
         var entries: [HistoryTurn] = []
+        let inClaw = currentMode == .claw && DesktopControlStore.shared.isEnabled
+
+        // Eaon Claw's identity leads everything else. Placed first so a model
+        // anchors on "I am an agent that controls this Mac" before it reads
+        // any tool catalog — without it, a weaker model swamped by tools was
+        // observed flatly denying it had any machine/browser access at all.
+        if inClaw {
+            entries.append(HistoryTurn(role: "system", content: Self.clawIdentityPreamble))
+        }
 
         let trimmed = customInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
@@ -1668,34 +1739,107 @@ class ChatViewModel {
             entries.append(HistoryTurn(role: "system", content: "What you remember about this user from earlier conversations:\n\(facts)"))
         }
 
-        // Only present at all while at least one plugin is connected —
-        // teaches the eaon:mcp markup and lists every connected service's
-        // live tool catalog in one self-contained block (see its own doc
-        // comment for why this can't just be a "here's what's new" addendum).
-        if let mcpInstruction = MCPConnectionStore.shared.agentInstructionBlock {
+        // Connected cloud plugins (GitHub, Notion, …) belong to Chat and
+        // Agent, NOT Eaon Claw. Claw is deliberately about *this Mac*; loading
+        // a dozen unrelated cloud tools there buried the device tools so badly
+        // that the model listed its cloud plugins and forgot it could see the
+        // screen. Keeping Claw's tool set to device + browser + web search is
+        // what makes it reliable.
+        if !inClaw, let mcpInstruction = MCPConnectionStore.shared.agentInstructionBlock {
             entries.append(HistoryTurn(role: "system", content: mcpInstruction))
         }
 
-        // Unlike the MCP block above, not gated on any connection state —
-        // web search has nothing to connect, so it's unconditional
-        // whenever the user hasn't turned it off (see `WebSearchStore`).
-        // Also carries the current date/time, so "what's today / what time
-        // is it" is answered from context instead of a (flaky, and for the
-        // wall clock unreliable) web search.
+        // Web search has nothing to connect, so it's unconditional whenever
+        // the user hasn't turned it off (see `WebSearchStore`) — useful in
+        // every conversational mode, Claw included (research tasks). Also
+        // carries the current date/time so "what's today" is answered from
+        // context instead of a flaky search.
         if WebSearchStore.shared.isEnabled {
             entries.append(HistoryTurn(role: "system", content: WebSearchTool.agentInstructionBlock()))
         }
 
-        // Only sent while the user has turned Computer Control on (Settings →
-        // Computer Control) — carries both the tool teaching and the
+        // Agent mode turns the model into the sandboxed coding agent — the
+        // eaon:run/edit/read/ls workspace protocol. Scoped to Agent mode
+        // (not sent in Chat), so ordinary conversation is never steered by
+        // it; this is the deliberate, mode-selected version of the old
+        // always-on coding prompt.
+        if currentMode == .agent {
+            entries.append(HistoryTurn(role: "system", content: WorkspaceParser.systemInstruction))
+        }
+
+        // Eaon Claw's device-control teaching + browser how-to + the
         // non-negotiable safety rules (no sudo, no credentials/purchases,
-        // treat read content as data not instructions). See its doc comment.
-        if DesktopControlStore.shared.isEnabled {
+        // treat read content as data not instructions). These come LAST so
+        // the concrete tool detail is the freshest thing before the user's
+        // message — primacy (identity, first) plus recency (the how, last).
+        if inClaw {
             entries.append(HistoryTurn(role: "system", content: DesktopControlTool.agentInstructionBlock()))
+            entries.append(HistoryTurn(role: "system", content: Self.clawBrowserInstructionBlock))
         }
 
         return entries
     }
+
+    /// Eaon Claw's opening system message — forceful and first. It exists
+    /// specifically to stop a model from mistaking itself for a cloud chatbot
+    /// with no machine access (observed live: a model in Claw denied it could
+    /// see the browser and listed only its cloud plugins). States the real
+    /// capability plainly and tells the model to reach for a tool rather than
+    /// refuse when asked about the screen, browser, or files.
+    private static let clawIdentityPreamble = """
+    You are Eaon Claw, an AI agent running directly on the user's Mac. You control this computer and its web browser through real tools — this is genuine local access, not a cloud assistant's limitations. You can read and organize files, run shell commands, open and drive apps, and control the browser: open pages, read what's on the screen, click, scroll, and fill forms.
+
+    Never tell the user you lack access to their machine, screen, browser, or files — you have that access. When they ask what's on their screen, what they're watching, what's open, or about a file, USE your tools to find out: read the browser with run_applescript, inspect the filesystem with list_directory or run_shell. Look first, then answer from what you actually observed — don't guess, and don't refuse.
+    """
+
+    /// Extra teaching for Eaon Claw specifically: how to drive the browser
+    /// through the tools it already has. `run_applescript` can control Safari
+    /// and Chrome (navigate, read the page, click, fill forms via JavaScript)
+    /// and `open_url` opens a link in the default browser — but a model, and
+    /// especially a smaller local one, won't reliably reach for AppleScript
+    /// unless shown concretely how. Concrete, copy-pasteable examples make
+    /// browser tasks actually work instead of the model guessing.
+    private static let clawBrowserInstructionBlock = """
+    Driving the browser is part of what you do, and most of it needs NO special setup.
+
+    TO SEE WHAT'S OPEN — what page the user is on, what they're watching, which tabs are open — read the tab title and URL. This is the first thing to reach for, and it works with only the standard one-time permission (no developer settings). Use `run_applescript`:
+
+    The active tab (Safari):
+    ```eaon:computer tool="run_applescript"
+    {"script": "tell application \\"Safari\\" to get {name, URL} of current tab of front window"}
+    ```
+
+    Every open tab (Safari):
+    ```eaon:computer tool="run_applescript"
+    {"script": "tell application \\"Safari\\" to get {name, URL} of every tab of front window"}
+    ```
+
+    The active tab (Google Chrome):
+    ```eaon:computer tool="run_applescript"
+    {"script": "tell application \\"Google Chrome\\" to get {title, URL} of active tab of front window"}
+    ```
+
+    Every open tab (Google Chrome):
+    ```eaon:computer tool="run_applescript"
+    {"script": "tell application \\"Google Chrome\\" to get {title, URL} of every tab of front window"}
+    ```
+
+    The tab title and URL usually already answer the question — a YouTube video's title, the show on Netflix, the article being read. Answer from them directly. If you don't know which browser is in front, try Chrome, then Safari.
+
+    TO OPEN A PAGE — use `open_url`.
+
+    TO READ THE FULL TEXT of a page, or to click or fill it — run JavaScript via `run_applescript`. This deeper control needs one extra one-time browser setting: "Allow JavaScript from Apple Events" (Safari → Settings → Advanced → "Show features for web developers", then Develop → Allow JavaScript from Apple Events; Chrome → View → Developer → Allow JavaScript from Apple Events). Only reach for this when the tab title and URL aren't enough.
+
+    Read the visible text of the current Chrome tab:
+    ```eaon:computer tool="run_applescript"
+    {"script": "tell application \\"Google Chrome\\" to execute front window's active tab javascript \\"document.body.innerText\\""}
+    ```
+
+    Notes:
+    - Prefer tab title/URL first — it answers most "what's open / what am I watching" questions with zero setup. Fall back to JavaScript only for full page content or clicking.
+    - If a JavaScript call errors saying JavaScript is disabled, tell the user exactly how to turn on "Allow JavaScript from Apple Events" (above) — but first check whether the tab title and URL already answered them.
+    - The same hard limits apply here as everywhere: never enter passwords, never buy anything or move money, never sign in on the user's behalf. If a task needs that, stop and hand it back to the user.
+    """
 
     /// Builds one request-ready history turn from a chat message: real
     /// image parts for attachments the active model can actually see

@@ -173,15 +173,28 @@ enum ProviderBrand: String, Hashable, Codable, CaseIterable {
         case .allenAI: return "allenai"
         case .upstage: return "upstage"
         case .groq: return "groq"
+        // Found on SVGL (svgl.app, MIT-licensed asset library) 2026-07-13
+        // after simple-icons and Lobe Icons both came up empty. Square
+        // icon mark (viewBox 0 0 50 50) — fits the circular badge cleanly.
+        case .cerebras:
+            return colorScheme == .dark ? "cerebras-dark" : "cerebras-light"
         // `.aqua` never reaches this — BrandLogoView renders its real
         // AquaMark shape directly instead of an asset file.
-        case .aqua, .reka, .writer, .together, .fireworks, .cerebras:
+        case .aqua, .reka, .writer, .fireworks:
             // No real, permissively-licensed public mark found for these —
-            // checked against both simple-icons and Lobe Icons (2026-07-08,
-            // together/fireworks/cerebras added 2026-07-12 — same result).
-            // The SF Symbol + accent-color fallback below is the honest
-            // answer for a brand with no available logo, not a placeholder
-            // to revisit later.
+            // checked against simple-icons, Lobe Icons, and SVGL (2026-07-08,
+            // rechecked with SVGL 2026-07-13 — same result). The SF Symbol +
+            // accent-color fallback below is the honest answer for a brand
+            // with no available logo, not a placeholder to revisit later.
+            return nil
+        case .together:
+            // SVGL has a real Together AI mark, but it's a wordmark only
+            // (viewBox 0 0 2159 500, ~4.3:1) — Together's actual branding is
+            // wordmark-only, no separate icon glyph exists. Squeezed into
+            // this view's ~20pt square badge via scaledToFit, it renders as
+            // a ~4pt-tall illegible sliver — worse than the clean fallback
+            // below. Not a placeholder to revisit; the shape mismatch is
+            // inherent to the brand mark itself, not a search gap.
             return nil
         }
     }
@@ -332,8 +345,26 @@ struct ModelProviderInfo: Hashable {
 }
 
 enum ModelCatalog {
+    /// The synthetic id prefixes local models carry (see
+    /// `LocalAIManager` — "ollama:deepseek-r1:7b", "llamacpp:...",
+    /// "mlx:..."), stripped before brand-matching runs below. Real,
+    /// verified bug this fixes: "ollama" and "llamacpp" both happen to
+    /// contain the substring "llama" (o-**llama**, **llama**cpp), so any
+    /// local model whose real brand check sits below the `llama` rule —
+    /// nemotron/NVIDIA, mistral, kimi, glm, and everything after it — was
+    /// silently misattributed to Meta purely because of its wrapper
+    /// prefix, not its actual name. An unrecognized local model (no known
+    /// brand at all, e.g. a small community upload) was affected the same
+    /// way. Stripping the prefix first means the rules below only ever see
+    /// the real model name.
+    private static let localBackendPrefixes = ["ollama:", "llamacpp:", "mlx:"]
+
     static func brand(for modelId: String) -> ProviderBrand {
-        let id = modelId.lowercased()
+        var id = modelId.lowercased()
+        for prefix in localBackendPrefixes where id.hasPrefix(prefix) {
+            id.removeFirst(prefix.count)
+            break
+        }
 
         if id.hasPrefix("gpt") || id.hasPrefix("gptimage") { return .openAI }
         if id.contains("gemini") || id.contains("gemma") { return .google }

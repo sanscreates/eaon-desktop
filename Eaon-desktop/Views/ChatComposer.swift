@@ -5,6 +5,10 @@ import UniformTypeIdentifiers
 struct ChatComposer: View {
     @Environment(\.themeColors) private var colors
     @Bindable var viewModel: ChatViewModel
+    /// Lets the mode switcher tell the window's root which surface to show —
+    /// switching to/from Eaon Claw or Image Studio swaps the whole view, not
+    /// just `viewModel.currentMode`. See `ModeSegmentedControl`.
+    var onModeChange: (EaonMode) -> Void = { _ in }
     @FocusState private var isFocused: Bool
     @State private var editorHeight: CGFloat = GrowingMessageField.minHeight
     @State private var isAttachMenuOpen = false
@@ -78,15 +82,29 @@ struct ChatComposer: View {
             .padding(.horizontal, 18)
             .padding(.top, 16)
 
-            // Row 2 — attach button pinned left, send button pinned right.
+            // Row 2 — attach button and mode switcher pinned left, send
+            // button pinned right. The mode switcher only shows before the
+            // conversation has actually started — pick a mode, THEN send;
+            // once there's a real reply in the transcript, switching tools/
+            // prompt out from under it mid-conversation would be confusing,
+            // so it's locked in and the control disappears rather than
+            // sitting there doing nothing.
             HStack(spacing: 8) {
                 plusButton
+                if viewModel.messages.isEmpty {
+                    ModeSegmentedControl(currentMode: viewModel.currentMode) { mode in
+                        viewModel.enterMode(mode)
+                        onModeChange(mode)
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .leading)))
+                }
                 Spacer(minLength: 0)
                 trailingControls
             }
             .padding(.horizontal, 12)
             .padding(.top, 8)
             .padding(.bottom, 12)
+            .animation(.easeOut(duration: 0.18), value: viewModel.messages.isEmpty)
         }
         .background(
             RoundedRectangle(cornerRadius: 26, style: .continuous)

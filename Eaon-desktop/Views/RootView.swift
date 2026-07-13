@@ -1,7 +1,9 @@
 import SwiftUI
 
 enum SidebarDestination: Hashable {
-    case chat
+    /// One of the four top-level modes (Chat / Agent / Eaon Claw / Image
+    /// Studio) — the conversational surface, framed for that mode.
+    case mode(EaonMode)
     case compare
     case feature(AppFeature)
     case project(UUID)
@@ -28,7 +30,12 @@ enum AppFeature: String, Hashable, CaseIterable {
 
 struct RootView: View {
     @Environment(\.colorScheme) private var systemColorScheme
-    @State private var selection: SidebarDestination = .chat
+    @State private var selection: SidebarDestination = .mode(.chat)
+    /// One-shot so the app reopens on the mode it was last left in (the
+    /// viewModel restores `currentMode` from defaults) without re-forcing
+    /// that mode every time this view reappears — e.g. returning from
+    /// Projects or Settings must not yank you back to a mode surface.
+    @State private var didInitialModeSync = false
     @State private var sidebarCollapsed = false
     @State private var showingSearchPalette = false
     @State private var showingSettings = false
@@ -92,7 +99,8 @@ struct RootView: View {
                     onNewChat: { newChat() },
                     onSelect: { id in
                         chatViewModel.selectConversation(id)
-                        selection = .chat
+                        chatViewModel.enterMode(.chat)
+                        selection = .mode(.chat)
                     },
                     onOpenSettings: { selectionId in
                         settingsInitialSelectionId = selectionId
@@ -239,16 +247,22 @@ struct RootView: View {
         .environment(\.themeColors, colors)
         .preferredColorScheme(appearance.colorScheme)
         .tint(appearance.accentColor)
+        .onAppear {
+            guard !didInitialModeSync else { return }
+            didInitialModeSync = true
+            selection = .mode(chatViewModel.currentMode)
+        }
     }
 
     @ViewBuilder
     private var detailView: some View {
         Group {
             switch selection {
-            case .chat:
-                // The agentic-coding workspace slides in on the right when
-                // the model creates files; the chat column itself is
-                // untouched, it just shares the width while the panel is up.
+            case .mode(.chat), .mode(.agent):
+                // Chat and the sandboxed coding Agent share the conversational
+                // surface; the coding workspace slides in on the right when
+                // the model creates files (most relevant in Agent mode).
+                let mode: EaonMode = { if case .mode(let m) = selection { return m } else { return .chat } }()
                 HStack(spacing: 0) {
                     ChatHomeView(
                         viewModel: chatViewModel,
@@ -257,7 +271,9 @@ struct RootView: View {
                         onOpenProviderSettings: { selectionId in
                             settingsInitialSelectionId = selectionId
                             showingSettings = true
-                        }
+                        },
+                        mode: mode,
+                        onModeChange: switchMode
                     )
                     if chatViewModel.isWorkspaceOpen {
                         CodeWorkspacePanel(viewModel: chatViewModel)
@@ -266,6 +282,28 @@ struct RootView: View {
                             .transition(.move(edge: .trailing))
                     }
                 }
+            case .mode(.claw):
+                ClawHomeView(
+                    viewModel: chatViewModel,
+                    isSidebarCollapsed: sidebarCollapsed,
+                    onExpandSidebar: { toggleSidebar() },
+                    onOpenProviderSettings: { selectionId in
+                        settingsInitialSelectionId = selectionId
+                        showingSettings = true
+                    },
+                    onModeChange: switchMode
+                )
+            case .mode(.imageStudio):
+                ImageStudioHomeView(
+                    viewModel: chatViewModel,
+                    isSidebarCollapsed: sidebarCollapsed,
+                    onExpandSidebar: { toggleSidebar() },
+                    onOpenProviderSettings: { selectionId in
+                        settingsInitialSelectionId = selectionId
+                        showingSettings = true
+                    },
+                    onModeChange: switchMode
+                )
             case .compare:
                 ModelCompareView(availableModels: chatViewModel.aquaOnlyChatModels)
             case .feature(.projects):
@@ -280,7 +318,8 @@ struct RootView: View {
                 ModelLibraryView(chatViewModel: chatViewModel) { modelId in
                     chatViewModel.startNewChat()
                     chatViewModel.selectModel(modelId)
-                    selection = .chat
+                    chatViewModel.enterMode(.chat)
+                    selection = .mode(.chat)
                 }
             case .project(let id):
                 if let project = chatViewModel.projects.first(where: { $0.id == id }) {
@@ -288,7 +327,7 @@ struct RootView: View {
                         viewModel: chatViewModel,
                         project: project,
                         onBack: { selection = .feature(.projects) },
-                        onOpenChat: { selection = .chat },
+                        onOpenChat: { chatViewModel.enterMode(.chat); selection = .mode(.chat) },
                         onRenameRequest: { projectPendingRename = $0 },
                         onDeleteRequest: { projectPendingDeletion = $0 }
                     )
@@ -319,7 +358,17 @@ struct RootView: View {
 
     private func newChat() {
         chatViewModel.startNewChat()
-        selection = .chat
+        // Keep whatever mode the user is in — a new chat inside Eaon Claw
+        // should stay Eaon Claw, not drop back to plain Chat.
+        selection = .mode(chatViewModel.currentMode)
+    }
+
+    /// The mode switcher (composer bar, plus the Eaon Claw/Image Studio
+    /// gate screens) only has a view onto `viewModel.currentMode` — it can't
+    /// see `selection`, which is what actually decides which top-level view
+    /// this window shows. This is the one place that keeps both in sync.
+    private func switchMode(_ mode: EaonMode) {
+        selection = .mode(mode)
     }
 
     private var hudOverlay: some View {

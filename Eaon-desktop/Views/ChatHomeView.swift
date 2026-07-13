@@ -15,6 +15,12 @@ struct ChatHomeView: View {
     /// Lets the model picker's per-provider gear icon open Settings landed
     /// directly on that provider's own page.
     var onOpenProviderSettings: (String) -> Void = { _ in }
+    /// The active mode — only used here to frame the empty state (heading +
+    /// blurb) so each mode reads as its own place. The conversational surface
+    /// itself is identical across Chat/Agent/Eaon Claw/Image Studio.
+    var mode: EaonMode = .chat
+    /// Forwarded to the composer's mode switcher — see `ChatComposer.onModeChange`.
+    var onModeChange: (EaonMode) -> Void = { _ in }
 
     @State private var showingShareSheet = false
 
@@ -98,12 +104,28 @@ struct ChatHomeView: View {
         VStack(spacing: 0) {
             Spacer()
 
-            Text("What can I help with?")
-                .font(AppFont.mono(34, weight: .bold))
-                .foregroundStyle(colors.textPrimary)
+            if mode == .chat {
+                Text("What can I help with?")
+                    .font(AppFont.mono(34, weight: .bold))
+                    .foregroundStyle(colors.textPrimary)
+                    .padding(.bottom, 26)
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: mode.icon)
+                        .font(.system(size: 30, weight: .semibold))
+                        .foregroundStyle(colors.textSecondary)
+                    Text(mode.title)
+                        .font(AppFont.mono(30, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                    Text(mode.blurb)
+                        .font(AppFont.sans(14))
+                        .foregroundStyle(colors.textTertiary)
+                        .multilineTextAlignment(.center)
+                }
                 .padding(.bottom, 26)
+            }
 
-            ChatComposer(viewModel: viewModel)
+            ChatComposer(viewModel: viewModel, onModeChange: onModeChange)
                 .frame(maxWidth: conversationMaxWidth)
                 .padding(.horizontal, 24)
 
@@ -152,7 +174,7 @@ struct ChatHomeView: View {
             }
 
             VStack(spacing: 6) {
-                ChatComposer(viewModel: viewModel)
+                ChatComposer(viewModel: viewModel, onModeChange: onModeChange)
                     .frame(maxWidth: conversationMaxWidth)
 
                 Text("Eaon can make mistakes. Check important info.")
