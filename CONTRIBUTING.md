@@ -41,4 +41,4 @@ don't open a public issue — reach out privately first.
 ## License
 
 By contributing, you agree your contribution is licensed under this
-project's [PolyForm Shield 1.0.0](LICENSE.md) license.
+project's [GNU GPL v3.0](LICENSE.md) license.

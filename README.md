@@ -44,7 +44,7 @@ to get set up and what to expect from a PR.
 
 ## License
 
-[PolyForm Shield 1.0.0](LICENSE.md) — you're free to use, modify, and
-distribute this software for any purpose, including commercially, with one
-restriction: you can't use it to build a competing product. See
+[GNU GPL v3.0](LICENSE.md) — you're free to use, study, modify, and
+redistribute this software. Any modified version you distribute must also
+be licensed under the GPL, with its source made available. See
 [LICENSE.md](LICENSE.md) for the exact terms.
