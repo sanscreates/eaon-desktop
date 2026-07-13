@@ -3,6 +3,31 @@
 All notable changes to Eaon are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/) — newest release on top.
 
+## [2026.1.9] — 2026-07-13
+
+### Added
+- Eaon Claw — a one-click, on-device agent mode that controls this actual
+  Mac (files, shell, apps, and the browser) to carry out real multi-step
+  tasks, off until explicitly enabled with full disclosure of what it can
+  do and its guardrails (asks first, Trash not delete, no sudo, no
+  passwords/purchases).
+- A 4-mode sidebar: Chat, Agent (sandboxed coding), Eaon Claw (on-device
+  control), and Image Studio — each its own capability context, picked
+  before a conversation starts via a segmented control you can tap or
+  smoothly drag between modes, sitting right on the composer.
+- Several new local models (Qwen3.6, Gemma4 26B, Llama4 Maverick, and
+  more), plus a "NEW" badge in the model library so recently-added models
+  stand out.
+
+### Fixed
+- Eaon Claw denying access to device/browser control on some local models
+  (e.g. Nemotron) — it now leads with a clear statement of what it can do
+  instead of a buried, easily-ignored instruction.
+- Local models (Ollama/llama.cpp) sometimes showing Meta's logo instead
+  of their real provider's — a matching bug caused by the internal
+  `ollama:`/`llamacpp:` id prefixes both containing the substring "llama".
+- Added a real Cerebras logo (was a generic fallback icon before).
+
 ## [2026.1.8] — 2026-07-12
 
 ### Added

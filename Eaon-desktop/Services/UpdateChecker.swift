@@ -8,7 +8,7 @@ import SwiftUI
 /// the LAST step of cutting a release, so a freshly-updated app never
 /// thinks the manifest's version is still newer than itself.
 enum AppVersion {
-    static let current = "2026.1.8"
+    static let current = "2026.1.9"
 }
 
 /// What the update server hosts — one small JSON file describing the newest
