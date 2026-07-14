@@ -11,15 +11,21 @@ struct AssistantMessageContentView: View {
     /// plain pulsing dot exactly as before.
     var loadingStatusText: String? = nil
 
-    private var extracted: ReasoningExtractor.Result {
-        ReasoningExtractor.extract(from: text)
-    }
-
-    private var blocks: [MessageBlock] {
-        MessageContentParser.parse(extracted.visibleContent)
+    /// Reasoning extraction + block parsing memoized together — these were
+    /// computed properties re-running their string scans two to three times
+    /// per body evaluation (body read `extracted` twice and `blocks` once,
+    /// and `blocks` itself re-ran `extracted`), on every typewriter tick
+    /// while streaming and on every scroll-in of a row. One cache entry per
+    /// distinct message text makes a finished message's re-render a lookup.
+    private var parsed: (extracted: ReasoningExtractor.Result, blocks: [MessageBlock]) {
+        RenderCache.shared.value("msg|\(text)", store: !isTyping) {
+            let extracted = ReasoningExtractor.extract(from: text)
+            return (extracted, MessageContentParser.parse(extracted.visibleContent))
+        }
     }
 
     var body: some View {
+        let (extracted, blocks) = parsed
         VStack(alignment: .leading, spacing: 12) {
             if let reasoning = extracted.reasoning {
                 ThinkingDisclosure(reasoning: reasoning, isInProgress: extracted.isReasoningInProgress)
@@ -35,7 +41,7 @@ struct AssistantMessageContentView: View {
                 }
             } else {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                    blockView(block, index: index)
+                    blockView(block, index: index, blockCount: blocks.count)
                 }
             }
         }
@@ -44,8 +50,8 @@ struct AssistantMessageContentView: View {
     }
 
     @ViewBuilder
-    private func blockView(_ block: MessageBlock, index: Int) -> some View {
-        let isLast = index == blocks.count - 1
+    private func blockView(_ block: MessageBlock, index: Int, blockCount: Int) -> some View {
+        let isLast = index == blockCount - 1
         let showCursor = isTyping && isLast
 
         switch block {
@@ -63,22 +69,44 @@ struct AssistantMessageContentView: View {
             // workspace panel, the way Cursor/Lovable summarize in chat).
             let fence = WorkspaceParser.fenceInfo(from: language)
             // aqua: is the legacy prefix — old conversations are full of
-            // it, and their chips must keep rendering as chips.
-            if let fenceLanguage = fence.language,
-               fenceLanguage.hasPrefix("eaon:") || fenceLanguage.hasPrefix("aqua:"),
-               fenceLanguage != "eaon:write", fenceLanguage != "aqua:write" {
-                ToolActionChip(
-                    kindToken: fenceLanguage,
-                    path: fence.path,
-                    toolName: fence.tool,
-                    serverId: fence.server,
-                    // Only "search" carries anything meaningful in the fence
-                    // BODY (the {"query": "..."} JSON) rather than an
-                    // attribute — passed through just for that one kind so
-                    // e.g. a large eaon:edit body never rides along here.
-                    bodyText: fenceLanguage == "eaon:search" ? code : nil,
-                    isStreaming: showCursor
-                )
+            // it, and their chips must keep rendering as chips. A model
+            // that drops the eaon:/aqua: prefix entirely (```computer,
+            // ```write_file, …) still executes — see
+            // `WorkspaceParser.prefixlessToolKind` — so display must
+            // recognize the identical shorthand, or a call that worked
+            // would render as an unrecognized raw code block.
+            let resolvedFenceLanguage: String? = {
+                if let lang = fence.language, lang.hasPrefix("eaon:") || lang.hasPrefix("aqua:") { return lang }
+                if let lang = fence.language, let kind = WorkspaceParser.prefixlessToolKind(lang) { return "eaon:" + kind }
+                return nil
+            }()
+            if let fenceLanguage = resolvedFenceLanguage, fenceLanguage != "eaon:write", fenceLanguage != "aqua:write" {
+                let kind = String(fenceLanguage.dropFirst(5))
+                // The bare tool-name shorthand (```write_file, no
+                // tool="..." attribute at all) names the tool as the kind
+                // itself; the canonical ```eaon:computer form names it in
+                // the tool="..." attribute. Resolving through DesktopTool
+                // covers both the same way the execution parser does.
+                let computerTool = DesktopTool(rawValue: kind)?.rawValue ?? fence.tool
+                if kind == "computer" || DesktopTool(rawValue: kind) != nil,
+                   let computerTool, ["write_file", "edit_file"].contains(computerTool) {
+                    FileDiffCard(toolName: computerTool, argumentsJSON: code, isStreaming: showCursor)
+                } else {
+                    ToolActionChip(
+                        kindToken: fenceLanguage,
+                        path: fence.path,
+                        toolName: (kind == "computer" || DesktopTool(rawValue: kind) != nil) ? computerTool : fence.tool,
+                        serverId: fence.server,
+                        // "search" and every "computer" call carry their
+                        // meaningful detail in the fence BODY (the JSON)
+                        // rather than an attribute — passed through for
+                        // both so e.g. a large eaon:edit body never rides
+                        // along here, but a run_shell command or a path
+                        // does.
+                        bodyText: (fenceLanguage == "eaon:search" || kind == "computer" || DesktopTool(rawValue: kind) != nil) ? code : nil,
+                        isStreaming: showCursor
+                    )
+                }
             } else if let path = fence.path {
                 WorkspaceFileCard(path: path, code: code, isStreaming: showCursor) {
                     onOpenWorkspaceFile?(path)
@@ -101,14 +129,19 @@ struct ToolActionChip: View {
     @Environment(\.themeColors) private var colors
     let kindToken: String
     let path: String?
-    /// The `tool="..."` attribute — only meaningful for the "mcp" kind.
+    /// The `tool="..."` attribute for "mcp"; for "computer" this instead
+    /// carries the resolved DesktopTool name (e.g. "run_shell") — either
+    /// from the canonical `tool="..."` attribute or the bare-shorthand
+    /// fence kind itself (```run_shell). Both are "which real action is
+    /// this," just spelled differently depending on the fence form.
     var toolName: String? = nil
     /// The `server="..."` attribute — only meaningful for the "mcp" kind.
     /// Drives the real service badge/name shown in place of the generic
     /// icon, now that more than one service can be connected at once.
     var serverId: String? = nil
-    /// The fence body — only populated (by the caller) for "search", whose
-    /// query lives in its JSON body rather than an attribute. Parsed
+    /// The fence body — populated (by the caller) for "search" (its query
+    /// lives in JSON rather than an attribute) and for every "computer"
+    /// call (path/command/etc. all live in JSON there too). Parsed
     /// leniently since it can be a partial, still-streaming JSON fragment.
     var bodyText: String? = nil
     var isStreaming: Bool = false
@@ -123,6 +156,20 @@ struct ToolActionChip: View {
         return query
     }
 
+    /// Memoized — `label`/`computerLabel` call `arg()` up to twice per
+    /// render, and each `computerArgs` access was a fresh JSONSerialization
+    /// parse of the fence body. Small JSON, but it ran on every tick of a
+    /// streaming reply; a lookup is effectively free.
+    private var computerArgs: [String: Any]? {
+        guard let bodyText, let data = bodyText.data(using: .utf8) else { return nil }
+        return RenderCache.shared.value("chipargs|\(bodyText)", store: !isStreaming) {
+            try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+    }
+
+    private func arg(_ key: String) -> String? { computerArgs?[key] as? String }
+    private func lastComponent(_ path: String?) -> String { path.map { ($0 as NSString).lastPathComponent } ?? "?" }
+
     private var icon: String {
         switch kind {
         case "run": return "play.fill"
@@ -130,6 +177,21 @@ struct ToolActionChip: View {
         case "read": return "eye"
         case "mcp": return "bolt.horizontal.circle"
         case "search": return "magnifyingglass"
+        case "computer":
+            switch toolName {
+            case "run_shell": return "terminal"
+            case "read_file": return "eye"
+            case "list_directory": return "folder"
+            case "create_folder": return "folder.badge.plus"
+            case "move_item": return "arrow.turn.up.right"
+            case "trash_item": return "trash"
+            case "open_path": return "arrow.up.forward.app"
+            case "open_app": return "app.badge.checkmark"
+            case "quit_app": return "xmark.app"
+            case "open_url": return "safari"
+            case "run_applescript": return "applescript"
+            default: return "hammer"
+            }
         default: return "list.bullet"
         }
     }
@@ -144,7 +206,28 @@ struct ToolActionChip: View {
             let toolText = toolName ?? "tool"
             return server.map { "\($0.displayName) · \(toolText)" } ?? "Call \(toolText)"
         case "search": return "Search: \(searchQuery ?? "…")"
+        case "computer": return computerLabel
         default: return kindToken
+        }
+    }
+
+    /// A per-tool label built from the fence's own JSON body, so e.g.
+    /// `run_shell` shows the actual command rather than the generic
+    /// "eaon:computer" the raw fence language would otherwise read as.
+    private var computerLabel: String {
+        switch toolName {
+        case "run_shell": return "Run: \(arg("command") ?? "…")"
+        case "read_file": return "Read \(lastComponent(arg("path")))"
+        case "list_directory": return "List \(arg("path") ?? "…")"
+        case "create_folder": return "New folder \(arg("path") ?? "…")"
+        case "move_item": return "Move \(lastComponent(arg("from"))) → \(arg("to") ?? "?")"
+        case "trash_item": return "Trash \(lastComponent(arg("path")))"
+        case "open_path": return "Open \(arg("path") ?? "…")"
+        case "open_app": return "Open \(arg("name") ?? "app")"
+        case "quit_app": return "Quit \(arg("name") ?? "app")"
+        case "open_url": return "Open \(arg("url") ?? "URL")"
+        case "run_applescript": return "Run AppleScript"
+        default: return toolName ?? "Computer"
         }
     }
 
@@ -261,6 +344,334 @@ struct WorkspaceFileCard: View {
         return isStreaming
             ? "Writing… \(lines) line\(lines == 1 ? "" : "s")"
             : "\(lines) line\(lines == 1 ? "" : "s") · Open in workspace"
+    }
+}
+
+/// A Cursor/Claude-Code-style inline diff for the coding agent's two
+/// content-bearing tools — `write_file` and `edit_file` — so a real code
+/// change is visible with real line numbers right in the chat, not just a
+/// generic "eaon:computer" chip. `write_file` has no "before" to diff
+/// against at this layer (only this one fence body is available here, not
+/// the rest of the conversation), so every line renders as added — an
+/// honest "this is the file's content now," not a fabricated diff against
+/// a version we can't see from here. `edit_file` already carries its own
+/// before/after (`search`/`replace`), so that IS a real diff; its two sides
+/// are numbered independently from 1 (old line N → new line N) since no
+/// absolute file position is available at this layer either — accurate
+/// framing over a cosmetic match to a real editor's absolute gutter.
+struct FileDiffCard: View {
+    @Environment(\.themeColors) private var colors
+    /// "write_file" or "edit_file" — the only two tools routed here.
+    let toolName: String
+    let argumentsJSON: String
+    var isStreaming: Bool = false
+
+    private struct DiffLine: Identifiable {
+        let id: Int
+        let number: Int
+        /// Plain text — only consulted to detect a genuinely empty line
+        /// (SwiftUI needs a non-empty string to hold the row's height).
+        let text: String
+        let attributed: AttributedString
+        let isAdded: Bool
+    }
+
+    /// Everything the card renders, derived from `(toolName, argumentsJSON,
+    /// colors)` in ONE pass. This used to be five separate computed
+    /// properties (`parsedArgs`, `path`, `fileName`, `lines`, the counts),
+    /// each re-parsing the full JSON and/or re-highlighting the entire file
+    /// on every access — and `body` accessed them ~5 times per render, per
+    /// typewriter tick while streaming. For the real 7.7KB snake.py that
+    /// meant re-highlighting ~38KB of text per tick at up to 250 ticks/s:
+    /// the single biggest contributor to the pinned-core lag this replaced.
+    private struct DiffModel {
+        var fileName = "file"
+        var lines: [DiffLine] = []
+        var addedCount = 0
+        var removedCount = 0
+    }
+
+    /// One computation per distinct input, memoized through `RenderCache` —
+    /// a finished message's card costs a dictionary lookup on re-render and
+    /// scroll-in. Still-streaming content (whose JSON grows every tick, so
+    /// every key is new) computes once per tick and skips storing.
+    private var model: DiffModel {
+        RenderCache.shared.value("diff|\(toolName)|\(colors == .dark)|\(argumentsJSON)", store: !isStreaming) {
+            Self.computeModel(toolName: toolName, argumentsJSON: argumentsJSON, colors: colors)
+        }
+    }
+
+    private static func computeModel(toolName: String, argumentsJSON: String, colors: ThemeColors) -> DiffModel {
+        // Strict parse ONCE; individual lenient fallbacks only when the
+        // whole document isn't valid JSON yet (mid-stream).
+        let strict = argumentsJSON.data(using: .utf8)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        func field(_ key: String) -> String? {
+            if let value = strict?[key] as? String { return value }
+            guard strict == nil else { return nil }
+            return partialStringField(key, in: argumentsJSON)
+        }
+
+        var model = DiffModel()
+        let path = field("path")
+        model.fileName = path.map { ($0 as NSString).lastPathComponent } ?? "file"
+        let language = SyntaxLanguage.detect(fileExtension: path.map { ($0 as NSString).pathExtension } ?? "")
+
+        if toolName == "write_file" {
+            // Absent (nil) means "content" hasn't started streaming in at
+            // all yet (still on "path") — genuinely nothing to show, vs.
+            // present-but-empty ("") which is a real empty file.
+            if let content = field("content") {
+                for (index, row) in splitHighlighted(content, language: language, colors: colors, keepEmptyLine: true).enumerated() {
+                    model.lines.append(DiffLine(id: index, number: index + 1, text: row.plain, attributed: row.attributed, isAdded: true))
+                }
+            }
+        } else {
+            let removed = field("search").map { splitHighlighted($0, language: language, colors: colors, keepEmptyLine: false) } ?? []
+            let added = field("replace").map { splitHighlighted($0, language: language, colors: colors, keepEmptyLine: false) } ?? []
+            for (index, row) in removed.enumerated() {
+                model.lines.append(DiffLine(id: index, number: index + 1, text: row.plain, attributed: row.attributed, isAdded: false))
+            }
+            for (index, row) in added.enumerated() {
+                model.lines.append(DiffLine(id: removed.count + index, number: index + 1, text: row.plain, attributed: row.attributed, isAdded: true))
+            }
+        }
+        model.addedCount = model.lines.lazy.filter(\.isAdded).count
+        model.removedCount = model.lines.count - model.addedCount
+        return model
+    }
+
+    /// Finds `"key":"` in a possibly-truncated JSON fragment and decodes
+    /// forward from the opening quote exactly like a JSON string literal —
+    /// honoring \", \\, \/, \n, \t, \r, and \uXXXX — stopping at an
+    /// unescaped closing quote (the field is complete) or simply running
+    /// out of characters (the field is still arriving; whatever decoded so
+    /// far is returned, which is what makes the card grow live token by
+    /// token instead of appearing all at once). Lone/incomplete escape
+    /// sequences at the very end (a trailing "\" or a "\u" with fewer than
+    /// four hex digits so far) stop the decode right before them rather
+    /// than guessing — the next character(s) will complete it on the next
+    /// update. Doesn't reconstruct \uXXXX surrogate pairs into a single
+    /// character (emoji etc.) — source code essentially never contains
+    /// one, so this isn't worth the extra complexity here.
+    private static func partialStringField(_ key: String, in json: String) -> String? {
+        guard let keyRange = json.range(of: "\"\(key)\"") else { return nil }
+        guard let colonIndex = json[keyRange.upperBound...].firstIndex(of: ":") else { return nil }
+        let afterColon = json[json.index(after: colonIndex)...]
+        guard let quoteIndex = afterColon.firstIndex(where: { !$0.isWhitespace }), afterColon[quoteIndex] == "\"" else { return nil }
+
+        var result = ""
+        var index = afterColon.index(after: quoteIndex)
+        while index < afterColon.endIndex {
+            let c = afterColon[index]
+            if c == "\\" {
+                let escapeIndex = afterColon.index(after: index)
+                guard escapeIndex < afterColon.endIndex else { break }
+                let escapeChar = afterColon[escapeIndex]
+                if escapeChar == "u" {
+                    let hexStart = afterColon.index(after: escapeIndex)
+                    guard let hexEnd = afterColon.index(hexStart, offsetBy: 4, limitedBy: afterColon.endIndex) else { break }
+                    if let codepoint = UInt32(afterColon[hexStart..<hexEnd], radix: 16), let scalar = Unicode.Scalar(codepoint) {
+                        result.append(Character(scalar))
+                    }
+                    index = hexEnd
+                    continue
+                }
+                switch escapeChar {
+                case "n": result.append("\n")
+                case "t": result.append("\t")
+                case "r": result.append("\r")
+                default: result.append(escapeChar) // \", \\, \/, or a lenient pass-through
+                }
+                index = afterColon.index(after: escapeIndex)
+            } else if c == "\"" {
+                return result
+            } else {
+                result.append(c)
+                index = afterColon.index(after: index)
+            }
+        }
+        return result
+    }
+
+    /// Highlights a whole snippet ONCE, then splits the *result* into
+    /// per-line pieces (rather than highlighting each line in isolation),
+    /// so a construct spanning several lines — a block comment, a
+    /// triple-quoted string — still colors correctly across the break; a
+    /// line entirely inside one but carrying no delimiter of its own would
+    /// otherwise fall back to plain text. Splits on "\n" and drops exactly
+    /// one trailing empty line for text ending in a newline (not a line
+    /// anyone wrote — would make a 46-line file read as 47), matching how
+    /// `write_file`'s own line count is computed. `keepEmptyLine` controls
+    /// what a genuinely empty string means: `write_file`'s whole `content`
+    /// being "" is still one real (blank) line of an empty file; `edit_file`'s
+    /// `search`/`replace` being "" is deliberately zero lines — its own doc
+    /// says an empty `replace` deletes the matched text outright, and
+    /// showing that as "+1 blank line added" would misrepresent a clean
+    /// deletion as an addition.
+    private static func splitHighlighted(_ text: String, language: SyntaxLanguage, colors: ThemeColors, keepEmptyLine: Bool) -> [(plain: String, attributed: AttributedString)] {
+        guard !text.isEmpty else {
+            return keepEmptyLine ? [("", AttributedString(""))] : []
+        }
+        let highlighted = SyntaxHighlighter.highlight(text, language: language, colors: colors)
+        var result: [(String, AttributedString)] = []
+        var lineStart = highlighted.startIndex
+        var index = highlighted.startIndex
+        while index < highlighted.endIndex {
+            if highlighted.characters[index] == "\n" {
+                let slice = highlighted[lineStart..<index]
+                result.append((String(slice.characters), AttributedString(slice)))
+                index = highlighted.index(afterCharacter: index)
+                lineStart = index
+            } else {
+                index = highlighted.index(afterCharacter: index)
+            }
+        }
+        let finalSlice = highlighted[lineStart..<highlighted.endIndex]
+        let finalPlain = String(finalSlice.characters)
+        if !(finalPlain.isEmpty && !result.isEmpty) {
+            result.append((finalPlain, AttributedString(finalSlice)))
+        }
+        return result
+    }
+
+    var body: some View {
+        // Once per render — header, emptiness check, and rows all read this
+        // same value instead of independently recomputing it.
+        let model = model
+        VStack(alignment: .leading, spacing: 0) {
+            header(model)
+            if !model.lines.isEmpty {
+                Divider().opacity(0.5)
+                diffBody(model)
+            } else if isStreaming {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Writing…")
+                        .font(AppFont.mono(11))
+                        .foregroundStyle(colors.textTertiary)
+                }
+                .padding(10)
+            } else {
+                Text("Couldn't preview this edit — see the tool result below.")
+                    .font(AppFont.mono(11))
+                    .foregroundStyle(colors.textTertiary)
+                    .padding(10)
+            }
+        }
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(colors.backgroundChip.opacity(0.6))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(colors.borderSubtle, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func header(_ model: DiffModel) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: toolName == "write_file" ? "doc.badge.plus" : "pencil")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(colors.textSecondary)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(colors.backgroundChipSecondary)
+                )
+
+            (Text(toolName == "write_file" ? "Write" : "Edit").fontWeight(.semibold)
+                + Text("  " + model.fileName))
+                .font(AppFont.mono(12.5))
+                .foregroundStyle(colors.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.head)
+
+            Spacer(minLength: 8)
+
+            if model.addedCount > 0 {
+                Text("+\(model.addedCount)")
+                    .font(AppFont.mono(11, weight: .semibold))
+                    .foregroundStyle(colors.diffAdded)
+            }
+            if model.removedCount > 0 {
+                Text("−\(model.removedCount)")
+                    .font(AppFont.mono(11, weight: .semibold))
+                    .foregroundStyle(colors.diffRemoved)
+            }
+            if isStreaming {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    private func diffBody(_ model: DiffModel) -> some View {
+        ScrollView {
+            // Lazy on purpose: the card caps its visible height at 280pt
+            // (~25 rows), and during streaming the new content lands at the
+            // BOTTOM, past what's shown — materializing all 200+ rows of a
+            // big file per tick built a mountain of Text views nobody could
+            // see. Lazy construction only builds what's scrolled into view.
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(model.lines.enumerated()), id: \.element.id) { index, line in
+                    diffRow(line, showCursor: isStreaming && index == model.lines.count - 1)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .frame(maxHeight: 280)
+        .background(colors.backgroundCode)
+        .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private func diffRow(_ line: DiffLine, showCursor: Bool) -> some View {
+        HStack(spacing: 0) {
+            Text(line.isAdded ? "+" : "−")
+                .font(AppFont.mono(11, weight: .bold))
+                .foregroundStyle(line.isAdded ? colors.diffAdded : colors.diffRemoved)
+                .frame(width: 14, alignment: .center)
+            Text("\(line.number)")
+                .font(AppFont.mono(10.5))
+                .foregroundStyle(colors.textTertiary)
+                .frame(width: 28, alignment: .trailing)
+                .padding(.trailing, 8)
+            // No `.foregroundStyle` here — `SyntaxHighlighter` already
+            // bakes a base color plus per-token overrides into the
+            // AttributedString itself (same reason `CodeBlockView` renders
+            // its highlighted text bare); adding one would paint over
+            // every token color it just set.
+            rowText(line, showCursor: showCursor)
+                .font(AppFont.mono(11.5))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 1.5)
+        .padding(.horizontal, 6)
+        .background((line.isAdded ? colors.diffAdded : colors.diffRemoved).opacity(0.12))
+    }
+
+    /// The last row gets a blinking cursor while the call is still
+    /// streaming — the same `TimelineView` blink already used for a
+    /// streaming plain code block (`CodeBlockView`) and the workspace
+    /// editor's own in-progress file (`CodeWorkspacePanel`), so a line
+    /// actively growing reads the same way everywhere else in the app.
+    @ViewBuilder
+    private func rowText(_ line: DiffLine, showCursor: Bool) -> some View {
+        let content = line.text.isEmpty ? AttributedString(" ") : line.attributed
+        if showCursor {
+            TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                let cursorVisible = Int(context.date.timeIntervalSince1970 * 2) % 2 == 0
+                (Text(content) + Text("▎").foregroundColor(colors.textPrimary.opacity(cursorVisible ? 0.95 : 0.2)))
+            }
+        } else {
+            Text(content)
+        }
     }
 }
 

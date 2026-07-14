@@ -10,6 +10,10 @@ struct MemorySettingsView: View {
     @Bindable var chatViewModel: ChatViewModel
     @State private var draft = ""
     @State private var showingClearConfirm = false
+    /// Non-nil while the learn-from-file confirmation is up — the second
+    /// half of that flow's heavy consent (the explicit file pick being the
+    /// first). Holds the picked file so Confirm knows what to act on.
+    @State private var pendingFileToLearn: URL?
     @FocusState private var isFocused: Bool
 
     private var isAddDisabled: Bool {
@@ -25,7 +29,7 @@ struct MemorySettingsView: View {
                 .padding(.top, 28)
                 .padding(.bottom, 8)
 
-            Text("When on, Eaon quietly notices durable facts you share — your name, role, ongoing projects, preferences — and brings them into future chats. Nothing is extracted or sent anywhere until you turn this on, and you can review or delete anything it remembers, any time.")
+            Text("When on, Eaon remembers what you share — who you are, what you're working on, and what's been happening in your life — and brings it into future chats naturally, like talking to someone who knows you. Nothing is extracted or sent anywhere until you turn this on, and you can review or delete anything it remembers, any time.")
                 .font(AppFont.sans(12))
                 .foregroundColor(colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -36,6 +40,7 @@ struct MemorySettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     toggleCard
                     backfillCard
+                    fileLearnCard
                     addCard
                     memoriesCard
                 }
@@ -50,6 +55,21 @@ struct MemorySettingsView: View {
             Button("Clear All", role: .destructive) { store.clearAll() }
         } message: {
             Text("This removes everything Eaon remembers about you. It can't be undone.")
+        }
+        .alert(
+            "Learn from \"\(pendingFileToLearn?.lastPathComponent ?? "file")\"?",
+            isPresented: Binding(
+                get: { pendingFileToLearn != nil },
+                set: { if !$0 { pendingFileToLearn = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { pendingFileToLearn = nil }
+            Button("Learn") {
+                if let url = pendingFileToLearn { chatViewModel.learnFromFile(url: url) }
+                pendingFileToLearn = nil
+            }
+        } message: {
+            Text("Up to the first \(MemoryExtractor.maxFileCharacters / 1000),000 characters of this file's text will be sent to your currently selected model to find things worth remembering. The file itself stays on this Mac, and everything learned appears below for review.")
         }
     }
 
@@ -77,13 +97,19 @@ struct MemorySettingsView: View {
 
                 HStack(spacing: 14) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Automatically learn new facts")
+                        Text("Automatically learn new things")
                             .font(AppFont.mono(13, weight: .semibold))
                             .foregroundColor(store.isEnabled ? colors.textPrimary : colors.textTertiary)
-                        Text("Silently reviews each message you send. Off just stops new facts from being added — what's already remembered keeps working, and \"Learn from your existing chats\" below still runs whenever you ask it to.")
+                        Text("Silently reviews each message you send for facts about you and happenings in your life. Off just stops new memories from being added — what's already remembered keeps working, and \"Learn from your existing chats\" below still runs whenever you ask it to.")
                             .font(AppFont.sans(11))
                             .foregroundColor(colors.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
+                        if store.isEnabled, store.isAutoLearnEnabled, let summary = store.lastAutoLearnSummary {
+                            Text(summary)
+                                .font(AppFont.mono(11))
+                                .foregroundColor(colors.textSecondary)
+                                .padding(.top, 2)
+                        }
                     }
                     Spacer(minLength: 0)
                     Toggle("", isOn: $store.isAutoLearnEnabled)
@@ -94,8 +120,75 @@ struct MemorySettingsView: View {
                 }
                 .padding(16)
                 .opacity(store.isEnabled ? 1 : 0.5)
+
+                Divider().overlay(colors.borderSubtle)
+
+                HStack(spacing: 14) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Also learn from connected plugins")
+                            .font(AppFont.mono(13, weight: .semibold))
+                            .foregroundColor(store.isEnabled ? colors.textPrimary : colors.textTertiary)
+                        Text("When a chat uses a connected service (your calendar, issues, documents…), what it returned can be remembered too. Off — the default — means memory only ever considers what you and the model wrote, never plugin results.")
+                            .font(AppFont.sans(11))
+                            .foregroundColor(colors.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    Toggle("", isOn: $store.isPluginLearnEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(AppearanceSettings.shared.accentColor)
+                        .disabled(!store.isEnabled || !store.isAutoLearnEnabled)
+                }
+                .padding(16)
+                .opacity(store.isEnabled && store.isAutoLearnEnabled ? 1 : 0.5)
             }
         }
+    }
+
+    /// Learn from a file the user explicitly picks — the "heavy consent"
+    /// path: an open panel (nothing is ever scanned uninvited), then a
+    /// confirmation spelling out exactly what gets sent where, then a
+    /// reviewable result. Never recursive, never a folder, one file at a
+    /// time.
+    @ViewBuilder
+    private var fileLearnCard: some View {
+        if store.isEnabled {
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 14) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Learn from a file on this Mac")
+                                .font(AppFont.mono(13, weight: .semibold))
+                                .foregroundColor(colors.textPrimary)
+                            Text("Pick a text file (notes, a journal, a bio…) and Eaon extracts things worth remembering from it. Only the file you pick is read, only after you confirm, and everything learned shows up below for review.")
+                                .font(AppFont.sans(11))
+                                .foregroundColor(colors.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                        if chatViewModel.isLearningFromFile {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("Choose File…") { pickFileToLearn() }
+                                .buttonStyle(.bordered)
+                                .disabled(store.isFull)
+                        }
+                    }
+                }
+                .padding(16)
+            }
+        }
+    }
+
+    private func pickFileToLearn() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.text]
+        panel.message = "Choose a text file for Eaon to learn from"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        pendingFileToLearn = url
     }
 
     /// Mines facts out of chats that already exist — not just ones going
@@ -218,11 +311,32 @@ struct MemorySettingsView: View {
 
     private func memoryRow(_ item: MemoryItem) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Text(item.text)
-                .font(AppFont.sans(13))
-                .foregroundColor(colors.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.text)
+                    .font(AppFont.sans(13))
+                    .foregroundColor(colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                // Events show when they were mentioned — that date is what
+                // makes "how did Friday's final go?" possible, so it's
+                // worth surfacing to the user too. Facts stay undated:
+                // they're meant to be currently true, and a stale-looking
+                // date would just invite doubt about a fact that's fine.
+                if item.resolvedKind == .event {
+                    Text(item.createdAt.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()))
+                        .font(AppFont.mono(10.5))
+                        .foregroundColor(colors.textTertiary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if item.resolvedKind == .event {
+                Text("Event")
+                    .font(AppFont.mono(10, weight: .medium))
+                    .foregroundColor(colors.textTertiary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(colors.backgroundChipSecondary))
+            }
 
             Button {
                 withAnimation(.uiEaseOut(duration: 0.2)) { store.remove(item.id) }

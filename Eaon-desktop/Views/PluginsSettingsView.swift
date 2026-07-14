@@ -13,7 +13,9 @@ import SwiftUI
 /// "Coming soon" row; a tag that never resolves is just clutter.
 struct PluginsSettingsView: View {
     @Environment(\.themeColors) private var colors
+    @Bindable private var customStore = CustomMCPServerStore.shared
     @State private var expandedIds: Set<String> = []
+    @State private var isAddingCustomServer = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -33,7 +35,7 @@ struct PluginsSettingsView: View {
             ScrollView {
                 SettingsCard {
                     VStack(spacing: 0) {
-                        ForEach(Array(MCPCatalog.available.enumerated()), id: \.element.id) { index, server in
+                        ForEach(Array(MCPCatalog.builtIn.enumerated()), id: \.element.id) { index, server in
                             if index > 0 {
                                 Divider().overlay(colors.borderSubtle)
                             }
@@ -46,11 +48,79 @@ struct PluginsSettingsView: View {
                     }
                 }
                 .padding(.horizontal, 32)
-                .padding(.bottom, 32)
+                .padding(.bottom, 20)
+
+                customServersSection
+                    .padding(.horizontal, 32)
+                    .padding(.bottom, 32)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(colors.backgroundPrimary)
+        .sheet(isPresented: $isAddingCustomServer) {
+            AddCustomMCPServerSheet(isPresented: $isAddingCustomServer)
+        }
+    }
+
+    /// Any MCP server reachable by URL, not just the individually-verified
+    /// built-in ones above — the same generic protocol client and
+    /// confirm/dispatch pipeline, just pointed somewhere the user chose.
+    private var customServersSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Custom servers")
+                    .font(AppFont.mono(13, weight: .semibold))
+                    .foregroundColor(colors.textSecondary)
+                Spacer()
+                Button {
+                    isAddingCustomServer = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                        Text("Add")
+                    }
+                    .font(AppFont.mono(12, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(colors.link)
+            }
+
+            if customStore.servers.isEmpty {
+                Text("Connect to any MCP server by URL — not just the ones above.")
+                    .font(AppFont.sans(12))
+                    .foregroundColor(colors.textTertiary)
+                    .padding(.vertical, 4)
+            } else {
+                SettingsCard {
+                    VStack(spacing: 0) {
+                        ForEach(Array(customServersWithDefinitions.enumerated()), id: \.element.server.id) { index, entry in
+                            if index > 0 {
+                                Divider().overlay(colors.borderSubtle)
+                            }
+                            PluginRow(
+                                server: entry.definition,
+                                isExpanded: expandedIds.contains(entry.definition.id),
+                                onToggle: { toggle(entry.definition.id) }
+                            )
+                            .contextMenu {
+                                Button("Remove Server", role: .destructive) {
+                                    customStore.remove(entry.server.id)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pairs each stored custom server with its converted `MCPServerDefinition`
+    /// so the context menu's "Remove" can act on the real stored id while
+    /// `PluginRow` itself only ever deals in definitions.
+    private var customServersWithDefinitions: [(server: CustomMCPServer, definition: MCPServerDefinition)] {
+        customStore.sortedServers.compactMap { server in
+            customStore.definitions.first { $0.id == "custom-\(server.id.uuidString)" }.map { (server, $0) }
+        }
     }
 
     private func toggle(_ id: String) {
@@ -60,6 +130,121 @@ struct PluginsSettingsView: View {
             } else {
                 expandedIds.insert(id)
             }
+        }
+    }
+}
+
+/// The "Add Custom Server" form — name, endpoint URL, token, and an
+/// advanced-disclosure auth scheme override for the rare server that
+/// doesn't use a plain Bearer token. Saves via `CustomMCPServerStore`, then
+/// immediately attempts to connect using the exact same path a built-in
+/// service's token field uses (`MCPConnectionStore.connect`), so adding and
+/// connecting is one step rather than two.
+private struct AddCustomMCPServerSheet: View {
+    @Environment(\.themeColors) private var colors
+    @Binding var isPresented: Bool
+
+    @State private var name = ""
+    @State private var endpoint = ""
+    @State private var token = ""
+    @State private var authScheme = "Bearer"
+    @State private var showsAdvanced = false
+    @State private var isConnecting = false
+    @State private var errorMessage: String?
+
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedEndpoint: String { endpoint.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canSave: Bool {
+        !trimmedName.isEmpty && URL(string: trimmedEndpoint)?.scheme != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Add Custom MCP Server")
+                .font(AppFont.mono(16, weight: .bold))
+                .foregroundColor(colors.textPrimary)
+
+            Text("Connect to any MCP server (Streamable HTTP) by its URL — self-hosted, internal, or one not in the catalog above.")
+                .font(AppFont.sans(12))
+                .foregroundColor(colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            labeledField("Name", text: $name, placeholder: "e.g. My Internal Tools")
+            labeledField("Endpoint URL", text: $endpoint, placeholder: "https://example.com/mcp")
+            labeledField("API Token", text: $token, placeholder: "Paste an API token", isSecure: true)
+
+            DisclosureGroup("Advanced", isExpanded: $showsAdvanced) {
+                labeledField("Auth header scheme", text: $authScheme, placeholder: "Bearer")
+                    .padding(.top, 8)
+            }
+            .font(AppFont.mono(12, weight: .medium))
+            .foregroundColor(colors.textSecondary)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(AppFont.mono(12))
+                    .foregroundColor(colors.destructive)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                    .buttonStyle(.bordered)
+                AccentButton(title: isConnecting ? "Connecting…" : "Add & Connect", isDisabled: !canSave || isConnecting) {
+                    save()
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
+    }
+
+    private func labeledField(_ label: String, text: Binding<String>, placeholder: String, isSecure: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(AppFont.mono(12, weight: .medium))
+                .foregroundColor(colors.textSecondary)
+            Group {
+                if isSecure {
+                    SecureField(placeholder, text: text)
+                } else {
+                    TextField(placeholder, text: text)
+                }
+            }
+            .textFieldStyle(.plain)
+            .font(AppFont.mono(13))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(colors.backgroundInput)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(colors.borderSubtle, lineWidth: 1))
+        }
+    }
+
+    private func save() {
+        errorMessage = nil
+        guard let url = URL(string: trimmedEndpoint), url.scheme != nil else {
+            errorMessage = "That doesn't look like a valid URL — include https://."
+            return
+        }
+        let scheme = authScheme.trimmingCharacters(in: .whitespacesAndNewlines)
+        let server = CustomMCPServer(displayName: trimmedName, endpoint: trimmedEndpoint, authScheme: scheme.isEmpty ? "Bearer" : scheme)
+        CustomMCPServerStore.shared.save(server, token: token)
+
+        guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            isPresented = false
+            return
+        }
+        guard let definition = CustomMCPServerStore.shared.definitions.first(where: { $0.id == "custom-\(server.id.uuidString)" }) else {
+            isPresented = false
+            return
+        }
+        isConnecting = true
+        Task {
+            await MCPConnectionStore.shared.connect(server: definition, token: token)
+            isConnecting = false
+            isPresented = false
         }
     }
 }

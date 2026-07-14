@@ -41,6 +41,16 @@ struct ThemeColors: Equatable {
     /// than the brand orange, since everyday chrome is monochrome by default.
     let link: Color
 
+    /// Diff colors for the coding agent's inline write/edit preview
+    /// (`FileDiffCard`) — fixed, recognizable green/red rather than the
+    /// app's monochrome default chrome, matching the diff-view convention
+    /// every code editor already trained the user on. Same values GitHub
+    /// uses for its own dark/light diffs, chosen for verified contrast
+    /// against `backgroundCode` in both themes rather than raw system
+    /// red/green, which would clash with this app's warmer neutrals.
+    let diffAdded: Color
+    let diffRemoved: Color
+
     func rowBackground(isSelected: Bool, isHovered: Bool) -> Color {
         if isSelected { return backgroundSelected }
         if isHovered { return backgroundHover }
@@ -84,7 +94,9 @@ struct ThemeColors: Equatable {
         userBubble: Color(hex: "#242424"),
         shadowColor: Color.black.opacity(0.5),
         destructive: Color(hex: "#FF6467"),
-        link: Color(hex: "#5B9BFF")
+        link: Color(hex: "#5B9BFF"),
+        diffAdded: Color(hex: "#3FB950"),
+        diffRemoved: Color(hex: "#F85149")
     )
 
     static let light = ThemeColors(
@@ -115,7 +127,9 @@ struct ThemeColors: Equatable {
         userBubble: Color(hex: "#F4F4F4"),
         shadowColor: Color.black.opacity(0.10),
         destructive: Color(hex: "#E7000B"),
-        link: Color(hex: "#2563EB")
+        link: Color(hex: "#2563EB"),
+        diffAdded: Color(hex: "#1A7F37"),
+        diffRemoved: Color(hex: "#CF222E")
     )
 }
 

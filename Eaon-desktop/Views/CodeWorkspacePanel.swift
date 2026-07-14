@@ -443,7 +443,12 @@ struct CodeWorkspacePanel: View {
 
     @ViewBuilder
     private func editorText(for file: WorkspaceFile) -> some View {
-        let highlighted = SyntaxHighlighter.highlight(file.content, language: detectedLanguage(for: file), colors: colors)
+        // Same memoization as CodeBlockView — the editor re-highlighted the
+        // whole open file on every panel re-render; a finished file's
+        // content never changes, so it's a lookup after the first time.
+        let highlighted = RenderCache.shared.value("ws|\(file.path)|\(colors == .dark)|\(file.content)", store: file.isComplete) {
+            SyntaxHighlighter.highlight(file.content, language: detectedLanguage(for: file), colors: colors)
+        }
         if !file.isComplete, viewModel.isGenerating {
             TimelineView(.periodic(from: .now, by: 0.5)) { context in
                 let cursorVisible = Int(context.date.timeIntervalSince1970 * 2) % 2 == 0

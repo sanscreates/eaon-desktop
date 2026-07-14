@@ -34,9 +34,9 @@ private struct WindowDragBlocker: NSViewRepresentable {
 
 /// The compact pill that replaced the sidebar's mode rows — lives in the
 /// composer bar, next to the attach button. Shown a second time at the top
-/// of Eaon Claw's enable card and Image Studio's setup card, since neither
-/// of those renders a composer: without it, landing on "Enable Eaon Claw"
-/// with nothing configured yet would be a dead end with no way back to Chat.
+/// of Eaon Claw's enable card, since that one renders no composer of its
+/// own: without it, landing on "Enable Eaon Claw" with nothing configured
+/// yet would be a dead end with no way back to Chat.
 ///
 /// Both a tap and a press-and-slide work: a `DragGesture(minimumDistance:
 /// 0)` covers both, since a plain tap is just a drag that never moves. While
@@ -61,16 +61,14 @@ struct ModeSegmentedControl: View {
     /// on `currentMode`'s own frame.
     @State private var liveDragX: CGFloat?
 
-    /// Short enough that all four fit comfortably inline — the full name
-    /// ("Eaon Claw", "Image Studio") still appears in that mode's own empty
-    /// state and enable/setup card, so nothing here is the only place it's
-    /// spelled out.
+    /// Short enough that all three fit comfortably inline — the full name
+    /// ("Eaon Claw") still appears in that mode's own empty state and
+    /// enable card, so nothing here is the only place it's spelled out.
     private func label(for mode: EaonMode) -> String {
         switch mode {
         case .chat: return "Chat"
         case .agent: return "Agent"
         case .claw: return "Claw"
-        case .imageStudio: return "Image"
         }
     }
 
@@ -336,82 +334,6 @@ struct ClawEnableView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(colors.backgroundPrimary)
-    }
-}
-
-// MARK: - Image Studio
-
-/// Image Studio's surface — the normal chat surface with an image model
-/// selected (generated images already render as large bubbles there). When
-/// no image model is configured yet, it shows setup guidance instead of a
-/// dead composer.
-struct ImageStudioHomeView: View {
-    @Environment(\.themeColors) private var colors
-    @Bindable var viewModel: ChatViewModel
-    var isSidebarCollapsed: Bool = false
-    var onExpandSidebar: () -> Void = {}
-    var onOpenProviderSettings: (String) -> Void = { _ in }
-    var onModeChange: (EaonMode) -> Void = { _ in }
-
-    var body: some View {
-        if viewModel.hasImageModels {
-            ChatHomeView(
-                viewModel: viewModel,
-                isSidebarCollapsed: isSidebarCollapsed,
-                onExpandSidebar: onExpandSidebar,
-                onOpenProviderSettings: onOpenProviderSettings,
-                mode: .imageStudio,
-                onModeChange: onModeChange
-            )
-        } else {
-            setupCard
-        }
-    }
-
-    private var setupCard: some View {
-        VStack(spacing: 0) {
-            HStack {
-                // No composer here either — same reasoning as Eaon Claw's
-                // enable card: this switcher must update the real view-model
-                // mode itself, not just tell RootView which surface to show.
-                ModeSegmentedControl(currentMode: .imageStudio) { mode in
-                    viewModel.enterMode(mode)
-                    onModeChange(mode)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-
-            VStack(spacing: 14) {
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 36, weight: .semibold))
-                    .foregroundStyle(colors.textSecondary)
-                Text("Image Studio")
-                    .font(AppFont.mono(28, weight: .bold))
-                    .foregroundStyle(colors.textPrimary)
-                Text("Generate images from a prompt using a hosted model, a cloud API key, or a local image server. Add one to get started.")
-                    .font(AppFont.sans(14))
-                    .foregroundStyle(colors.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 420)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button {
-                    onOpenProviderSettings("imageProviders")
-                } label: {
-                    Text("Set up image providers")
-                        .font(AppFont.mono(13, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 9)
-                        .background(Capsule().fill(AppearanceSettings.shared.accentColor))
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 4)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
         .background(colors.backgroundPrimary)
     }
 }

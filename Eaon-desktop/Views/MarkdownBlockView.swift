@@ -10,8 +10,16 @@ struct MarkdownBlockView: View {
 
     private var fontSize: CGFloat { AppearanceSettings.shared.fontSize.messageFontSize }
 
+    /// Memoized — this re-parsed the whole segment on every body
+    /// evaluation, which during streaming meant every typewriter tick.
+    /// Streaming segments still churn the cache (their text grows every
+    /// tick, so each key is new), but FIFO eviction handles that; the win
+    /// is finished messages, whose re-renders and scroll-ins become
+    /// lookups.
     private var lines: [MarkdownLine] {
-        MarkdownLineParser.parse(text)
+        RenderCache.shared.value("md|\(text)") {
+            MarkdownLineParser.parse(text)
+        }
     }
 
     var body: some View {
@@ -152,11 +160,18 @@ struct MarkdownBlockView: View {
     }
 
     private func inline(_ raw: String) -> Text {
-        var options = AttributedString.MarkdownParsingOptions()
-        options.interpretedSyntax = .inlineOnlyPreservingWhitespace
-        if let attributed = try? AttributedString(markdown: raw, options: options) {
-            return Text(attributed)
+        // `AttributedString(markdown:)` is Foundation's full markdown
+        // parser — the priciest single call in this view, and it ran once
+        // per paragraph/bullet/table-cell per render (a 50-line reply
+        // meant ~50 parses per tick while streaming). Memoized by the raw
+        // string: identical inline segments across all messages share one
+        // parse.
+        let attributed = RenderCache.shared.value("mdinline|\(raw)") { () -> AttributedString? in
+            var options = AttributedString.MarkdownParsingOptions()
+            options.interpretedSyntax = .inlineOnlyPreservingWhitespace
+            return try? AttributedString(markdown: raw, options: options)
         }
+        if let attributed { return Text(attributed) }
         return Text(raw)
     }
 

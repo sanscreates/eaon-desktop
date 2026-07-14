@@ -151,12 +151,24 @@ final class WindowChrome {
             observing = true
             // Resize is when AppKit re-lays-out the titlebar to factory
             // positions; key/main changes redraw the lights and can do the
-            // same, so re-apply on all of them.
+            // same, so re-apply on all of them. didChangeScreen is the one
+            // that matters for *dragging*: moving the window to a display
+            // with a different scale factor or menu-bar height makes AppKit
+            // redo the titlebar's internal layout using its own factory
+            // math, silently undoing this class's container resize/button
+            // nudge — the buttons (and the container's hidden decoration
+            // view) revert to stock positions until something else
+            // happened to re-trigger this method. That reversion is what
+            // read as "things go half off the window" after a drag: right
+            // on a single display, wrong the moment the window crosses
+            // onto a differently-scaled one.
             for name: Notification.Name in [
                 NSWindow.didResizeNotification,
                 NSWindow.didBecomeKeyNotification,
                 NSWindow.didResignKeyNotification,
                 NSWindow.didExitFullScreenNotification,
+                NSWindow.didChangeScreenNotification,
+                NSWindow.didMoveNotification,
             ] {
                 NotificationCenter.default.addObserver(
                     forName: name, object: window, queue: .main

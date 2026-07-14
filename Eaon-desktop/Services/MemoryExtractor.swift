@@ -1,10 +1,13 @@
 import Foundation
 
 /// After a turn finishes, silently asks the same model that just answered
-/// to pull out any new, durable fact worth remembering about the user —
-/// never shown, never allowed to touch the visible chat, and completely
-/// invisible on failure (wrong provider, bad JSON back, network error: all
-/// just skip, exactly like the update checker's background check does).
+/// to pull out anything new worth remembering about the user — never shown
+/// in chat, never allowed to touch the visible conversation. No longer
+/// silent about its OUTCOME, though: every run records a one-line result
+/// (`MemoryStore.lastAutoLearnSummary`) the Memory settings page shows,
+/// because a background feature whose success and failure both look like
+/// nothing-happened is indistinguishable from broken — the exact complaint
+/// that led to this rewrite.
 ///
 /// Deliberately NOT built on tool-calling — this app talks to three very
 /// different wire formats (Aqua's own API, several BYOK providers, and
@@ -12,12 +15,16 @@ import Foundation
 /// inconsistent at best) and a memory feature that only sometimes works
 /// depending on which model you picked is exactly the gimmick the user
 /// explicitly doesn't want. A plain extra completion call, asked to reply
-/// with nothing but a JSON array, works identically everywhere.
+/// with a JSON array, works identically everywhere.
 @MainActor
 enum MemoryExtractor {
+    /// `toolContext` — this turn's plugin/tool results, passed ONLY when
+    /// the user has separately consented (`MemoryStore.isPluginLearnEnabled`);
+    /// nil otherwise, so unconsented extraction never even sees them.
     static func run(
         userText: String,
         assistantText: String,
+        toolContext: String?,
         customConfig: CustomProviderConfig?,
         localRecord: LocalModelRecord?,
         aquaApiKey: String?,
@@ -27,7 +34,7 @@ enum MemoryExtractor {
         guard !userText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         let existing = MemoryStore.shared.memories.map(\.text)
-        let prompt = buildPrompt(userText: userText, assistantText: assistantText, existing: existing)
+        let prompt = buildPrompt(userText: userText, assistantText: assistantText, toolContext: toolContext, existing: existing)
         let history: [HistoryTurn] = [
             HistoryTurn(role: "system", content: systemPrompt),
             HistoryTurn(role: "user", content: prompt),
@@ -39,11 +46,77 @@ enum MemoryExtractor {
             localRecord: localRecord,
             aquaApiKey: aquaApiKey,
             modelId: modelId
-        ) else { return }
+        ) else {
+            MemoryStore.shared.lastAutoLearnSummary = "Couldn't check the last message (the model didn't answer) · \(Self.timestamp())"
+            return
+        }
 
-        let facts = parseFacts(from: raw)
-        guard !facts.isEmpty else { return }
-        MemoryStore.shared.addExtracted(facts)
+        let items = MemoryParsing.parseItems(from: raw)
+        guard !items.isEmpty else {
+            MemoryStore.shared.lastAutoLearnSummary = "Nothing new in the last message · \(Self.timestamp())"
+            return
+        }
+        let added = MemoryStore.shared.addExtracted(items)
+        MemoryStore.shared.lastAutoLearnSummary = added > 0
+            ? "Learned \(added) new thing\(added == 1 ? "" : "s") · \(Self.timestamp())"
+            : "Nothing new in the last message · \(Self.timestamp())"
+    }
+
+    private static func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter.string(from: Date())
+    }
+
+    // MARK: - Learn from a user-chosen file
+
+    /// Extracts memories from text the user explicitly picked and confirmed
+    /// (see `MemorySettingsView`'s open-panel + confirmation flow — the
+    /// consent lives there; by the time this runs, the user has said yes
+    /// twice). Returns how many memories were added, or a thrown
+    /// `FileLearnError` with a plain-words reason.
+    enum FileLearnError: Error, LocalizedError {
+        case unreadable
+        case modelFailed
+
+        var errorDescription: String? {
+            switch self {
+            case .unreadable: return "That file couldn't be read as text."
+            case .modelFailed: return "The model didn't answer — try again, or switch models."
+            }
+        }
+    }
+
+    static let maxFileCharacters = 12_000
+
+    static func runOnFileText(
+        _ text: String,
+        fileName: String,
+        customConfig: CustomProviderConfig?,
+        localRecord: LocalModelRecord?,
+        aquaApiKey: String?,
+        modelId: String
+    ) async throws -> Int {
+        let capped = String(text.prefix(maxFileCharacters))
+        let existing = MemoryStore.shared.memories.map(\.text)
+        let known = existing.isEmpty ? "(nothing yet)" : existing.map { "- \($0)" }.joined(separator: "\n")
+        let prompt = """
+        Already known about the user:
+        \(known)
+
+        Text the user chose to share from their file "\(fileName)":
+        \(capped)
+
+        JSON array of NEW items worth remembering, or []:
+        """
+        let history: [HistoryTurn] = [
+            HistoryTurn(role: "system", content: backfillSystemPrompt),
+            HistoryTurn(role: "user", content: prompt),
+        ]
+        guard let raw = await requestRaw(history: history, customConfig: customConfig, localRecord: localRecord, aquaApiKey: aquaApiKey, modelId: modelId) else {
+            throw FileLearnError.modelFailed
+        }
+        return MemoryStore.shared.addExtracted(MemoryParsing.parseItems(from: raw))
     }
 
     // MARK: - Backfill from existing conversations
@@ -57,7 +130,6 @@ enum MemoryExtractor {
     /// conversation, which costs time and — on a paid model — money, so
     /// it only runs when asked for, same philosophy as every other
     /// side-effectful action in this app.
-    ///
     struct BackfillResult {
         let conversationsReviewed: Int
         let conversationsTotal: Int
@@ -97,12 +169,7 @@ enum MemoryExtractor {
             ]
 
             if let raw = await requestRaw(history: history, customConfig: customConfig, localRecord: localRecord, aquaApiKey: aquaApiKey, modelId: modelId) {
-                let facts = parseFacts(from: raw)
-                if !facts.isEmpty {
-                    let before = MemoryStore.shared.memories.count
-                    MemoryStore.shared.addExtracted(facts)
-                    newFactCount += MemoryStore.shared.memories.count - before
-                }
+                newFactCount += MemoryStore.shared.addExtracted(MemoryParsing.parseItems(from: raw))
             }
             reviewed = index + 1
             onProgress(reviewed, candidates.count, newFactCount)
@@ -135,13 +202,25 @@ enum MemoryExtractor {
         return lines.joined(separator: "\n")
     }
 
+    /// The shared definition of what's worth remembering — used verbatim by
+    /// both extraction prompts so per-turn and backfill/file extraction
+    /// never drift apart on what qualifies.
+    private static let whatToRemember = """
+    Reply with ONLY a JSON array (no markdown, no commentary) of objects like {"kind": "fact", "text": "..."} or {"kind": "event", "text": "..."}.
+    - "fact": durable — their name, role, location, relationships, preferences, ongoing projects, things that stay true.
+    - "event": a happening in their life a thoughtful friend would remember and ask about later — a trip, an exam, an interview, being sick, a hard week, weekend plans, something they're excited or worried about. Keep any stated timing in the text itself (e.g. "has a math final on Friday").
+    Never include: one-off requests to the assistant (like a coding task), facts about the assistant, anything already in the known list, guesses, or sensitive details (health, finances, other people's private information) beyond what the user plainly volunteered as worth remembering.
+    Reply with [] if nothing qualifies.
+    """
+
+    private static let systemPrompt = """
+    You silently extract things worth remembering about a user, from one exchange of a chat, for a personalization feature.
+    \(whatToRemember)
+    """
+
     private static let backfillSystemPrompt = """
-    You silently extract durable facts worth remembering about a user, from an existing chat transcript, for a \
-    personalization feature. Reply with ONLY a JSON array of short strings (no markdown, no commentary) — new \
-    facts not already known. Reply with [] if nothing new and durable was found.
-    Only include things like: the user's name, role, location, ongoing projects, stated preferences, or a \
-    significant event they explicitly shared. Never include one-off requests, facts about the assistant, \
-    anything already in the known list, or speculation.
+    You silently extract things worth remembering about a user, from text they shared or an existing chat transcript, for a personalization feature.
+    \(whatToRemember)
     """
 
     private static func backfillPrompt(transcript: String, existing: [String]) -> String {
@@ -153,79 +232,30 @@ enum MemoryExtractor {
         Chat transcript:
         \(transcript)
 
-        JSON array of NEW durable facts, or []:
+        JSON array of NEW items worth remembering, or []:
         """
     }
 
-    private static let systemPrompt = """
-    You silently extract durable facts worth remembering about a user, from one exchange of a chat, for a \
-    personalization feature. Reply with ONLY a JSON array of short strings (no markdown, no commentary) — new \
-    facts not already known. Reply with [] if nothing new and durable was mentioned.
-    Only include things like: the user's name, role, location, ongoing projects, stated preferences, or a \
-    significant event they explicitly shared. Never include one-off requests, facts about the assistant, \
-    anything already in the known list, or speculation.
-    """
-
-    private static func buildPrompt(userText: String, assistantText: String, existing: [String]) -> String {
+    private static func buildPrompt(userText: String, assistantText: String, toolContext: String?, existing: [String]) -> String {
         let known = existing.isEmpty ? "(nothing yet)" : existing.map { "- \($0)" }.joined(separator: "\n")
-        return """
+        var sections = """
         Already known about the user:
         \(known)
 
         Latest exchange:
         User: \(userText)
         Assistant: \(assistantText)
-
-        JSON array of NEW durable facts, or []:
         """
-    }
+        if let toolContext, !toolContext.isEmpty {
+            sections += """
 
-    private static func parseFacts(from raw: String) -> [String] {
-        guard let jsonText = Self.extractJSONArray(from: raw),
-              let data = jsonText.data(using: .utf8),
-              let array = try? JSONSerialization.jsonObject(with: data) as? [String] else { return [] }
-        return array
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && $0.count < 300 }
-    }
 
-    /// Finds a JSON array's exact substring anywhere in `text` — tracking
-    /// bracket depth and skipping over quoted-string contents (so a
-    /// literal "[" or "]" inside a fact string, or in trailing prose,
-    /// doesn't throw off the boundary) — rather than requiring the whole
-    /// reply to be pure JSON. Models reliably ignore "reply with ONLY
-    /// JSON, no commentary" — the exact same lesson that motivated
-    /// switching tool-calling to a native mechanism: text-format
-    /// instructions aren't dependable, especially on weaker/local models
-    /// — so this has to tolerate a preamble ("Sure, here's what I
-    /// found:") or a trailing note instead of silently discarding real
-    /// facts every time one shows up, which is what a bare
-    /// `hasPrefix("```")` check did before this.
-    private static func extractJSONArray(from text: String) -> String? {
-        guard let start = text.firstIndex(of: "[") else { return nil }
-        var depth = 0
-        var inString = false
-        var isEscaped = false
-        var index = start
-        while index < text.endIndex {
-            let char = text[index]
-            if isEscaped {
-                isEscaped = false
-            } else if char == "\\" {
-                isEscaped = true
-            } else if char == "\"" {
-                inString.toggle()
-            } else if !inString {
-                if char == "[" {
-                    depth += 1
-                } else if char == "]" {
-                    depth -= 1
-                    if depth == 0 { return String(text[start...index]) }
-                }
-            }
-            index = text.index(after: index)
+            Results returned by services the user connected and consented to learn from (their calendar, issues, documents…):
+            \(toolContext)
+            """
         }
-        return nil
+        sections += "\n\nJSON array of NEW items worth remembering, or []:"
+        return sections
     }
 
     // MARK: - One-shot completion (reuses the same tested wire-format code the real chat path uses)
@@ -238,7 +268,10 @@ enum MemoryExtractor {
         modelId: String
     ) async -> String? {
         var collected = ""
-        let typewriter = TypewriterStreamController { collected = $0 }
+        // `instant` — this stream is never shown to anyone; running it
+        // through the chat UI's deliberate typing-reveal pacing just made
+        // every background extraction take seconds longer for no one.
+        let typewriter = TypewriterStreamController(instant: true) { collected = $0 }
 
         do {
             if let customConfig, let key = CustomProviderStore.shared.apiKey(for: customConfig.id) {
@@ -253,9 +286,12 @@ enum MemoryExtractor {
                     format: .openAICompatible,
                     modelIDs: [localRecord.requestModelId]
                 )
+                // Same strict-template flattening the chat path uses — this
+                // history is already [system, user] (a no-op today), but a
+                // template that rejects it would kill extraction silently.
                 try await CustomProviderAPIService().streamCompletion(
                     config: ephemeralConfig, apiKey: "local-no-key", modelId: localRecord.requestModelId,
-                    history: history, typewriter: typewriter
+                    history: history.flattenedForStrictChatTemplates, typewriter: typewriter
                 )
             } else if let aquaApiKey {
                 try await requestAquaRaw(apiKey: aquaApiKey, modelId: modelId, history: history, typewriter: typewriter)

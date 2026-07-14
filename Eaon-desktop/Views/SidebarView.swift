@@ -57,8 +57,8 @@ struct SidebarView: View {
 
     private var navItems: some View {
         VStack(alignment: .leading, spacing: 2) {
-            // Mode switching (Chat/Agent/Eaon Claw/Image Studio) lives in the
-            // composer bar now, not here — see `ModeSegmentedControl`.
+            // Mode switching (Chat/Agent/Eaon Claw) lives in the composer
+            // bar now, not here — see `ModeSegmentedControl`.
             SidebarNavRow(icon: "square.and.pencil", title: "New Chat", trailing: "⌘N", shortcut: "n") {
                 onNewChat()
             }

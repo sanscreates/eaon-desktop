@@ -43,21 +43,29 @@ struct ModelListCard: View {
                 onCancel: { editingModel = nil }
             )
         }
+        // "Hide", not "Remove"/"Delete" — this flow ONLY takes the model
+        // out of the picker (`hideModel` → `ModelPreferencesStore`); it
+        // never deletes anything from disk. The old destructive-red
+        // "Remove" read as real deletion, which for a local model meant a
+        // user could "remove" gigabytes here and reasonably expect their
+        // storage back — one of the live reports behind the
+        // says-deleted-but-storage-unchanged confusion. Actually deleting
+        // a local model lives in Settings → Models.
         .alert(
-            "Remove model?",
+            "Hide this model?",
             isPresented: Binding(
                 get: { modelPendingDeletion != nil },
                 set: { if !$0 { modelPendingDeletion = nil } }
             ),
             presenting: modelPendingDeletion
         ) { model in
-            Button("Remove", role: .destructive) {
+            Button("Hide") {
                 chatViewModel.hideModel(model.id)
                 modelPendingDeletion = nil
             }
             Button("Cancel", role: .cancel) { modelPendingDeletion = nil }
         } message: { model in
-            Text("\(model.id) will be hidden from the model picker. You can restore it from the + menu.")
+            Text("\(model.id) will be hidden from the model picker — nothing is deleted from this Mac. Restore it from the + menu, or delete a downloaded model for real in Settings → Models.")
         }
     }
 

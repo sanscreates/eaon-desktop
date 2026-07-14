@@ -17,12 +17,23 @@ struct ChatHomeView: View {
     var onOpenProviderSettings: (String) -> Void = { _ in }
     /// The active mode — only used here to frame the empty state (heading +
     /// blurb) so each mode reads as its own place. The conversational surface
-    /// itself is identical across Chat/Agent/Eaon Claw/Image Studio.
+    /// itself is identical across Chat/Agent/Eaon Claw.
     var mode: EaonMode = .chat
     /// Forwarded to the composer's mode switcher — see `ChatComposer.onModeChange`.
     var onModeChange: (EaonMode) -> Void = { _ in }
 
     @State private var showingShareSheet = false
+    /// True while the bottom of the conversation is visible (or close to
+    /// it) — the only state in which new content should auto-scroll into
+    /// view. Set from `BottomAnchorOffsetKey`'s live measurement, not from
+    /// gesture detection, so it reflects where the content actually is
+    /// regardless of whether the user got there by trackpad scroll, a
+    /// drag, or a keyboard shortcut. Starts true so a freshly opened chat
+    /// still lands at the bottom.
+    @State private var isNearBottom = true
+    /// Token for the local scroll-wheel monitor installed while the
+    /// conversation is on screen — see `installScrollIntentMonitor`.
+    @State private var scrollIntentMonitor: Any?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -140,37 +151,126 @@ struct ChatHomeView: View {
     private var conversation: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
-                ScrollView {
-                    // Spacing is 0 on the stack itself and applied per-row
-                    // instead — full space before a genuinely new turn
-                    // (a user message, or the first assistant-side reply to
-                    // one), tight space between a turn's own internal steps
-                    // (tool-call chip → tool-result card → continuation
-                    // text), so a multi-step reply reads as one continuous
-                    // answer instead of several separate messages.
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(viewModel.messages.enumerated()), id: \.element.id) { index, message in
-                            messageRow(index: index, message: message)
+                ZStack(alignment: .bottomTrailing) {
+                    GeometryReader { viewportGeo in
+                        ScrollView {
+                            // Spacing is 0 on the stack itself and applied
+                            // per-row instead — full space before a
+                            // genuinely new turn (a user message, or the
+                            // first assistant-side reply to one), tight
+                            // space between a turn's own internal steps
+                            // (tool-call chip → tool-result card →
+                            // continuation text), so a multi-step reply
+                            // reads as one continuous answer instead of
+                            // several separate messages.
+                            LazyVStack(spacing: 0) {
+                                ForEach(Array(viewModel.messages.enumerated()), id: \.element.id) { index, message in
+                                    messageRow(index: index, message: message)
+                                }
+                                if let activityText = viewModel.agentActivityText {
+                                    ThinkingIndicator(statusText: activityText)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.top, 6)
+                                        .transition(.opacity)
+                                }
+                                // Reports its own position back up via
+                                // `BottomAnchorOffsetKey` so `isNearBottom`
+                                // reflects where the content actually is —
+                                // see that key's own doc for why this beats
+                                // inferring "the user scrolled" from a
+                                // gesture instead.
+                                Color.clear
+                                    .frame(height: 8)
+                                    .id(bottomAnchor)
+                                    .background(
+                                        GeometryReader { anchorGeo in
+                                            Color.clear.preference(
+                                                key: BottomAnchorOffsetKey.self,
+                                                value: anchorGeo.frame(in: .named(Self.scrollCoordinateSpace)).maxY
+                                            )
+                                        }
+                                    )
+                            }
+                            .animation(.easeOut(duration: 0.15), value: viewModel.agentActivityText)
+                            .frame(maxWidth: conversationMaxWidth)
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 12)
+                            .padding(.bottom, 12)
                         }
-                        if let activityText = viewModel.agentActivityText {
-                            ThinkingIndicator(statusText: activityText)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.top, 6)
-                                .transition(.opacity)
+                        .coordinateSpace(name: Self.scrollCoordinateSpace)
+                        .onPreferenceChange(BottomAnchorOffsetKey.self) { anchorMaxY in
+                            // 60pt of slack so settling scroll physics (or
+                            // the anchor's own 8pt height) don't flicker
+                            // the jump-to-bottom button right at the edge.
+                            // Diff-guarded write inside an explicit
+                            // withAnimation: this preference fires on every
+                            // layout tick, and an always-on `.animation(value:)`
+                            // over the whole ZStack (the previous design)
+                            // kept an animation context alive continuously.
+                            let near = anchorMaxY <= viewportGeo.size.height + 60
+                            if near != isNearBottom {
+                                withAnimation(.easeOut(duration: 0.15)) { isNearBottom = near }
+                            }
                         }
-                        Color.clear.frame(height: 8).id(bottomAnchor)
                     }
-                    .animation(.easeOut(duration: 0.15), value: viewModel.agentActivityText)
-                    .frame(maxWidth: conversationMaxWidth)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 24)
-                    .padding(.top, 12)
-                    .padding(.bottom, 12)
+                    // A message the user just sent is an explicit "show me
+                    // what happens next" — always follow, and re-arm
+                    // following for the rest of that turn even if they'd
+                    // scrolled away during a previous one. Every other
+                    // change (a tool-call chip, a tool-result card, the
+                    // next step's bubble, streamed content) is the agent
+                    // loop's own bookkeeping mid-turn and follows only
+                    // while the user hasn't deliberately scrolled up to
+                    // read something — the entire point of this feature.
+                    //
+                    // Content ticks follow WITHOUT animation: the typewriter
+                    // fires these up to ~250×/s, and a 200ms eased scrollTo
+                    // per tick meant overlapping animations fighting each
+                    // other — and, worse, a user's upward flick happening
+                    // MID-animation kept measuring as "still near bottom,"
+                    // so following re-captured them before they could
+                    // escape (the reported "I can't scroll up while it's
+                    // responding"). Instant jumps track the growing content
+                    // just as well with none of that.
+                    .onChange(of: viewModel.messages.last?.content) { _, _ in
+                        if isNearBottom { scrollToBottom(proxy, animated: false) }
+                    }
+                    .onChange(of: viewModel.messages.count) { oldCount, newCount in
+                        if newCount > oldCount, viewModel.messages.last?.isUser == true {
+                            isNearBottom = true
+                            scrollToBottom(proxy)
+                        } else if isNearBottom {
+                            scrollToBottom(proxy, animated: false)
+                        }
+                    }
+                    .onChange(of: viewModel.agentActivityText) { _, _ in
+                        if isNearBottom { scrollToBottom(proxy, animated: false) }
+                    }
+                    // A different conversation entirely (switched in the
+                    // sidebar, or a fresh new chat) — never inherit
+                    // whatever scroll state the previous conversation left
+                    // behind; always open at its own bottom.
+                    .onChange(of: viewModel.currentConversationId) { _, _ in
+                        isNearBottom = true
+                        scrollToBottom(proxy, animated: false)
+                    }
+                    .onAppear {
+                        scrollToBottom(proxy, animated: false)
+                        installScrollIntentMonitor()
+                    }
+                    .onDisappear { removeScrollIntentMonitor() }
+
+                    if !isNearBottom {
+                        JumpToBottomButton {
+                            withAnimation(.easeOut(duration: 0.15)) { isNearBottom = true }
+                            scrollToBottom(proxy)
+                        }
+                        .padding(.trailing, 24)
+                        .padding(.bottom, 16)
+                        .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .bottomTrailing)))
+                    }
                 }
-                .onChange(of: viewModel.messages.last?.content) { _, _ in scrollToBottom(proxy) }
-                .onChange(of: viewModel.messages.count) { _, _ in scrollToBottom(proxy) }
-                .onChange(of: viewModel.agentActivityText) { _, _ in scrollToBottom(proxy) }
-                .onAppear { scrollToBottom(proxy, animated: false) }
             }
 
             VStack(spacing: 6) {
@@ -189,6 +289,7 @@ struct ChatHomeView: View {
     }
 
     private let bottomAnchor = "aqua-bottom-anchor"
+    private static let scrollCoordinateSpace = "aqua-chat-scroll"
 
     // Named rather than left inline in `conversation`'s `ForEach` — a
     // `MessageCell` call carrying this many parameters, inside a closure
@@ -207,6 +308,8 @@ struct ChatHomeView: View {
             showFooter: isLastInAssistantRun(index),
             loadingStatusText: viewModel.activeTypingMessageId == message.id ? viewModel.loadingStatusText : nil
         )
+        // The skip-unchanged-rows gate — see MessageCell's own == doc.
+        .equatable()
         .padding(.top, topSpacing(before: index))
         .id(message.id)
     }
@@ -242,6 +345,76 @@ struct ChatHomeView: View {
         } else {
             proxy.scrollTo(bottomAnchor, anchor: .bottom)
         }
+    }
+
+    /// The user's own scroll gesture is the authoritative "stop following
+    /// me" signal. Position measurement alone (the preference above) loses
+    /// a race during fast streams: an upward flick that hasn't yet carried
+    /// the anchor past the 60pt slack still measures as "near bottom," so
+    /// the next content tick would scroll right back down and re-capture
+    /// the user — reported live as "I can't scroll up while the model is
+    /// responding." An `NSEvent` local monitor sees the wheel/trackpad
+    /// event itself the moment it happens: any upward scroll disarms
+    /// following instantly, no measurement involved. Re-arming stays
+    /// measurement-based (actually returning to the bottom), plus the
+    /// explicit re-arms (sending a message, the jump-to-bottom button).
+    /// The monitor is app-local and returns the event untouched — purely a
+    /// listener. A scroll in some other scroll view (the diff card, the
+    /// workspace panel) can disarm too, which is harmless: the next
+    /// preference tick re-arms if the conversation is in fact still at its
+    /// bottom.
+    private func installScrollIntentMonitor() {
+        guard scrollIntentMonitor == nil else { return }
+        scrollIntentMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            if event.scrollingDeltaY > 0, isNearBottom {
+                isNearBottom = false
+            }
+            return event
+        }
+    }
+
+    private func removeScrollIntentMonitor() {
+        if let scrollIntentMonitor {
+            NSEvent.removeMonitor(scrollIntentMonitor)
+        }
+        scrollIntentMonitor = nil
+    }
+}
+
+/// The bottom anchor's own bottom edge, measured in `chatScroll`'s named
+/// coordinate space (applied to the `ScrollView` itself, so this is
+/// relative to the visible viewport, not the scrolled content) — small
+/// when the anchor sits inside or just below the visible area, large once
+/// the user has scrolled it well out of view. Reported live so
+/// "auto-scroll or not" reflects real content position rather than
+/// inferring intent from a drag gesture, which would miss a trackpad
+/// scroll, a keyboard page-down, or the view settling after a resize.
+private struct BottomAnchorOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+/// Floating affordance shown only once the user has scrolled away from a
+/// live-updating bottom — the explicit way back, rather than requiring a
+/// manual drag all the way down.
+private struct JumpToBottomButton: View {
+    @Environment(\.themeColors) private var colors
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.down")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(colors.textPrimary)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(colors.backgroundElevated))
+                .overlay(Circle().stroke(colors.borderSubtle, lineWidth: 1))
+                .shadow(color: colors.shadowColor, radius: 8, y: 3)
+        }
+        .buttonStyle(.plain)
+        .help("Jump to bottom")
     }
 }
 
@@ -319,12 +492,29 @@ struct TopBarIconButton: View {
 
 // MARK: - Message cell
 
-struct MessageCell: View {
+/// `Equatable` so SwiftUI can skip re-rendering rows whose inputs didn't
+/// change. Without this, the closure properties (`onRegenerate`,
+/// `onOpenWorkspaceFile`) — recreated fresh by the parent every render and
+/// incomparable by reflection — made EVERY visible row re-evaluate its
+/// whole body (markdown parse, syntax highlight, diff derivation) on EVERY
+/// typewriter tick of a streaming reply, up to ~250 times a second. The
+/// closures are semantically constant (same view-model methods every
+/// time), so comparing everything BUT them is exactly right. Applied via
+/// `.equatable()` at the call site in `messageRow`.
+struct MessageCell: View, Equatable {
     @Environment(\.themeColors) private var colors
     let message: ChatMessage
     var isActivelyTyping: Bool = false
     var onRegenerate: () -> Void = {}
     var onOpenWorkspaceFile: ((String) -> Void)? = nil
+
+    static func == (lhs: MessageCell, rhs: MessageCell) -> Bool {
+        lhs.message == rhs.message
+            && lhs.isActivelyTyping == rhs.isActivelyTyping
+            && lhs.showHeader == rhs.showHeader
+            && lhs.showFooter == rhs.showFooter
+            && lhs.loadingStatusText == rhs.loadingStatusText
+    }
     /// True only for the first assistant-side message in a run of
     /// consecutive non-user messages (an agent turn) — shows the model
     /// name/logo once per turn instead of once per internal step, so a
@@ -418,6 +608,15 @@ struct MessageCell: View {
         HStack {
             Spacer(minLength: 60)
             VStack(alignment: .trailing, spacing: 8) {
+                if let skillName = message.invokedSkillName {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("Skill: \(skillName)")
+                            .font(AppFont.mono(11, weight: .medium))
+                    }
+                    .foregroundStyle(colors.textTertiary)
+                }
                 if !message.attachments.isEmpty {
                     MessageAttachmentsView(attachments: message.attachments)
                 }
@@ -721,7 +920,7 @@ struct MessageActionsRow: View {
     }
 }
 
-private struct ActionIcon: View {
+struct ActionIcon: View {
     @Environment(\.themeColors) private var colors
     let systemName: String
     var help: String = ""

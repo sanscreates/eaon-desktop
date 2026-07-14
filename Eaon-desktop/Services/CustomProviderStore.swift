@@ -155,8 +155,19 @@ final class CustomProviderStore {
     private let storageKey = "aqua_custom_providers"
     private(set) var configs: [CustomProviderConfig] = []
 
+    /// modelId → owning config id, rebuilt on every mutation of `configs`.
+    /// `config(owning:)` is called per model, per `chatModels` evaluation,
+    /// per frame — a live CPU sample showed the old linear scan (which
+    /// re-TRIMMED every config's model-id list on every single call) as a
+    /// top frame in the sustained full-core burn. A stored dictionary keeps
+    /// this observable (views reading it still register a dependency, since
+    /// it's a tracked property mutated alongside `configs`) while making
+    /// the hot lookup O(1) with zero allocation.
+    private var ownerByModelId: [String: UUID] = [:]
+
     private init() {
         load()
+        rebuildOwnerIndex()
     }
 
     var sortedConfigs: [CustomProviderConfig] {
@@ -164,9 +175,21 @@ final class CustomProviderStore {
     }
 
     /// The config (if any) that lists a given model id as its own — first
-    /// match wins if a user somehow duplicates an id across two configs.
+    /// match wins if a user somehow duplicates an id across two configs
+    /// (preserved by `rebuildOwnerIndex` keeping the first writer of a key).
     func config(owning modelId: String) -> CustomProviderConfig? {
-        configs.first { $0.trimmedModelIDs.contains(modelId) }
+        guard let ownerId = ownerByModelId[modelId] else { return nil }
+        return configs.first { $0.id == ownerId }
+    }
+
+    private func rebuildOwnerIndex() {
+        var index: [String: UUID] = [:]
+        for config in configs {
+            for modelId in config.trimmedModelIDs where index[modelId] == nil {
+                index[modelId] = config.id
+            }
+        }
+        ownerByModelId = index
     }
 
     func apiKey(for configId: UUID) -> String? {
@@ -179,6 +202,7 @@ final class CustomProviderStore {
         } else {
             configs.append(config)
         }
+        rebuildOwnerIndex()
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedKey.isEmpty {
             try APIKeyStore.saveAPIKey(trimmedKey, forAccount: keychainAccount(for: config.id))
@@ -191,6 +215,7 @@ final class CustomProviderStore {
             ProviderLogoStore.deleteLogo(fileName: fileName)
         }
         configs.removeAll { $0.id == id }
+        rebuildOwnerIndex()
         APIKeyStore.deleteAPIKey(forAccount: keychainAccount(for: id))
         persist()
     }

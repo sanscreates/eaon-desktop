@@ -72,8 +72,10 @@ struct MCPServerDefinition: Identifiable, Equatable {
 
 enum MCPCatalog {
     /// Every connectable service, in the order the Plugins page renders
-    /// them.
-    static let available: [MCPServerDefinition] = [
+    /// them. Merged with any custom servers the user has added — see
+    /// `available` below, which is what every real consumer (the Plugins
+    /// page, tool dispatch, the reconnect-at-launch loop) actually reads.
+    static let builtIn: [MCPServerDefinition] = [
         .init(
             id: "github", displayName: "GitHub",
             summary: "Repos, issues, and pull requests.",
@@ -275,6 +277,18 @@ enum MCPCatalog {
         ),
     ]
 
+    /// The built-in, individually-verified catalog plus whatever custom
+    /// servers the user has added (Settings → Plugins → Add Custom
+    /// Server) — reading `CustomMCPServerStore.shared` requires the main
+    /// actor, same as every other store this app merges into a live list
+    /// this way (e.g. `ChatViewModel.allChatCapableModels` reading
+    /// `CustomProviderStore.shared`).
+    @MainActor
+    static var available: [MCPServerDefinition] {
+        builtIn + CustomMCPServerStore.shared.definitions
+    }
+
+    @MainActor
     static func definition(for id: String) -> MCPServerDefinition? {
         available.first { $0.id == id }
     }

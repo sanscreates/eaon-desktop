@@ -112,6 +112,47 @@ enum LocalBackend: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// User-chosen GPU-offload behavior for a llama.cpp model, mapped straight
+/// to llama-server's own `-ngl`/`--gpu-layers` flag. Hugging-Face-sourced
+/// llama.cpp models only: MLX exposes no CPU/GPU switch at all (`mlx_lm.server
+/// --help` has nothing like it — MLX is Metal-only by design on Apple
+/// Silicon), and Ollama manages its own GPU/CPU split with no per-model hook
+/// Eaon controls.
+enum GPUOffloadMode: String, Codable, CaseIterable, Identifiable {
+    case auto
+    case cpuOnly
+    case maxGPU
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .cpuOnly: return "CPU only"
+        case .maxGPU: return "Max GPU"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .auto: return "Let llama.cpp decide how many layers fit in GPU memory."
+        case .cpuOnly: return "Run entirely on the CPU — slower, but avoids GPU memory pressure."
+        case .maxGPU: return "Force every layer onto the GPU."
+        }
+    }
+
+    /// The value to pass to `-ngl`, or nil to omit the flag entirely —
+    /// llama-server's own default is already "auto", so `.auto` here should
+    /// leave the spawned command identical to today's (unset) behavior.
+    var gpuLayersArgument: String? {
+        switch self {
+        case .auto: return nil
+        case .cpuOnly: return "0"
+        case .maxGPU: return "all"
+        }
+    }
+}
+
 // MARK: - Model record
 
 /// One locally-runnable model. `id` is namespaced ("ollama:llama3.2:latest")
@@ -151,6 +192,11 @@ struct LocalModelRecord: Identifiable, Codable, Equatable {
     /// so older persisted records — everything before Ollama itself started
     /// serving non-chat models — decode fine without this key.
     var isImageGeneration: Bool?
+    /// User override for `-ngl`, llama.cpp-only (see `GPUOffloadMode`). Nil
+    /// means "auto" — both for records predating this field and for anyone
+    /// who's never touched the control — decode-safe for the same reason as
+    /// every other optional added here after records already existed.
+    var gpuMode: GPUOffloadMode?
 }
 
 // MARK: - Curated catalog (data-driven)
@@ -394,7 +440,16 @@ final class LocalAIManager {
         }
 
         ollamaReachable = false
-        ollamaModels = []
+        // Deliberately NOT clearing `ollamaModels` here anymore: a
+        // transient fetch failure (server restarting, briefly busy) used
+        // to blank every Ollama row at once — which, right after a delete
+        // attempt, read as "everything was deleted" while 20GB sat
+        // untouched on disk. Keeping the last-known list with
+        // `ollamaReachable = false` stays truthful: the models genuinely
+        // are still on this Mac; only the server is momentarily not
+        // answering. The list corrects itself on the next successful
+        // fetch, and the genuinely-uninstalled case is already handled by
+        // the `installed` guard above (which does clear).
     }
 
     private func applyOllamaTags(_ tags: OllamaTagsResponse) {
@@ -686,14 +741,45 @@ final class LocalAIManager {
     // MARK: Ollama delete
 
     /// Removes a model from Ollama's local store (DELETE /api/delete).
-    func deleteOllamaModel(_ name: String) async {
+    /// Returns nil on VERIFIED success, or a user-facing reason on failure.
+    /// The old version fired the request and ignored everything about the
+    /// outcome (`_ = try? …`) — combined with the refresh below, a failed
+    /// delete looked exactly like a successful one, which is precisely how
+    /// "the app says deleted but my storage didn't change" happens (seen
+    /// live: 20GB of Ollama models intact after in-app deletion). Verified
+    /// means verified: even a 200 is only trusted after the tags list
+    /// confirms the model is actually gone.
+    func deleteOllamaModel(_ name: String) async -> String? {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:11434/api/delete")!)
         request.httpMethod = "DELETE"
         request.timeoutInterval = 30
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": name])
-        _ = try? await URLSession.shared.data(for: request)
+        let payload = (try? JSONSerialization.data(withJSONObject: ["model": name])) ?? Data()
+
+        let statusCode: Int
+        let responseBody: String
+        do {
+            // upload(for:from:) rather than data(for:) with httpBody — both
+            // tested working against a live Ollama today, but upload's
+            // explicit body can't be silently dropped by intermediaries
+            // that special-case DELETE.
+            let (data, response) = try await URLSession.shared.upload(for: request, from: payload)
+            statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            responseBody = String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            return "Couldn't reach the Ollama server to delete \(name) — is it running? (\(error.localizedDescription))"
+        }
+
         await refreshOllamaModels()
+
+        guard (200...299).contains(statusCode) else {
+            let detail = responseBody.isEmpty ? "HTTP \(statusCode)" : responseBody
+            return "Ollama refused to delete \(name): \(detail)"
+        }
+        if ollamaReachable, ollamaModels.contains(where: { $0.requestModelId == name }) {
+            return "Ollama reported success deleting \(name), but it's still in the model list — try again, or run `ollama rm \(name)` in Terminal."
+        }
+        return nil
     }
 
     /// The single, backend-aware place to delete any local model — Ollama's
@@ -702,12 +788,14 @@ final class LocalAIManager {
     /// in the app should route through this rather than picking a backend's
     /// method itself: `removeUserModel` only touches the llama.cpp/MLX list,
     /// so calling it directly for an Ollama model silently does nothing.
-    func deleteModel(_ record: LocalModelRecord) async {
+    /// Returns nil on verified success, or a user-facing failure reason —
+    /// callers must show it, never swallow it.
+    func deleteModel(_ record: LocalModelRecord) async -> String? {
         switch record.backend {
         case .ollama:
-            await deleteOllamaModel(record.requestModelId)
+            return await deleteOllamaModel(record.requestModelId)
         case .llamaCpp, .mlx:
-            removeUserModel(id: record.id)
+            return removeUserModel(id: record.id)
         }
     }
 
@@ -1208,15 +1296,57 @@ final class LocalAIManager {
         persistUserModels()
     }
 
-    func removeUserModel(id: String) {
+    /// Returns nil on success, or a user-facing reason when the on-disk
+    /// cleanup didn't actually happen — the registry row is removed either
+    /// way (the model disappears from the app regardless), but the caller
+    /// can then tell the user their disk space was NOT freed instead of
+    /// implying it was.
+    @discardableResult
+    func removeUserModel(id: String) -> String? {
+        var failure: String?
+        let record = userModels.first { $0.id == id }
+
         // Delete the file too, but ONLY if it lives in our own managed
         // downloads folder — never a file the user picked from elsewhere.
-        if let record = userModels.first(where: { $0.id == id }),
-           record.isFile == true,
+        if let record, record.isFile == true,
            let source = record.source, source.hasPrefix(Self.managedModelsDirectory.path) {
             try? FileManager.default.removeItem(atPath: source)
+            if FileManager.default.fileExists(atPath: source) {
+                failure = "The model file couldn't be deleted — it's still at \(source)."
+            }
         }
+
+        // An MLX model's weights don't live in our managed folder at all —
+        // `mlx_lm.server` downloads them into Hugging Face's shared cache.
+        // Deleting only the registry row silently left multi-GB snapshot
+        // directories behind (the "says deleted but storage is unchanged"
+        // class of bug). Remove exactly this model's own cache directory,
+        // never anything else in the shared cache.
+        if let record, record.backend == .mlx, record.isFile != true,
+           let repo = record.source, repo.contains("/") {
+            let cacheDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".cache/huggingface/hub/models--\(repo.replacingOccurrences(of: "/", with: "--"))", isDirectory: true)
+            if FileManager.default.fileExists(atPath: cacheDir.path) {
+                try? FileManager.default.removeItem(at: cacheDir)
+                if FileManager.default.fileExists(atPath: cacheDir.path) {
+                    failure = "The model's downloaded weights couldn't be deleted — they're still in \(cacheDir.path)."
+                }
+            }
+        }
+
         userModels.removeAll { $0.id == id }
+        if activeSpawned?.modelId == id { stopSpawnedServer() }
+        persistUserModels()
+        return failure
+    }
+
+    /// llama.cpp only — see `GPUOffloadMode`. Stops a currently-running
+    /// server for this model so the next chat send respawns it with the
+    /// new `-ngl` value instead of silently continuing to run under the
+    /// old one until the app restarts.
+    func setGPUMode(_ mode: GPUOffloadMode, for id: String) {
+        guard let index = userModels.firstIndex(where: { $0.id == id }), userModels[index].backend == .llamaCpp else { return }
+        userModels[index].gpuMode = mode
         if activeSpawned?.modelId == id { stopSpawnedServer() }
         persistUserModels()
     }
@@ -1346,7 +1476,12 @@ final class LocalAIManager {
         case .llamaCpp:
             let source = record.source ?? ""
             let modelArgs = (record.isFile ?? false) ? ["-m", source] : ["-hf", source]
-            process.arguments = modelArgs + ["--port", "\(LocalBackend.llamaCpp.port)", "--host", "127.0.0.1"]
+            // `.auto` omits the flag entirely — llama-server's own default
+            // is already "auto" (fit to device memory), so leaving this
+            // unset for anyone who's never touched the control changes
+            // nothing about today's spawned command.
+            let gpuArgs = (record.gpuMode ?? .auto).gpuLayersArgument.map { ["-ngl", $0] } ?? []
+            process.arguments = modelArgs + gpuArgs + ["--port", "\(LocalBackend.llamaCpp.port)", "--host", "127.0.0.1"]
         case .mlx:
             process.arguments = ["--model", record.source ?? "", "--port", "\(LocalBackend.mlx.port)", "--host", "127.0.0.1"]
         case .ollama:
@@ -1375,7 +1510,14 @@ final class LocalAIManager {
         for _ in 0..<1800 {
             try Task.checkCancellation()
             if !process.isRunning {
-                let tail = String((serverLogs[record.backend] ?? "").suffix(400))
+                // 400 was too short: llama.cpp repeats the full model path
+                // (often 100+ chars for an HF `<repo>__<file>.gguf` name)
+                // two or three times in its last lines, which pushed the
+                // one line that actually names the failure — "unknown model
+                // architecture: 'x'", "invalid ggml type" — out of the
+                // window entirely, leaving only the generic "failed to load
+                // model" wrapper. 1500 keeps real headroom above that.
+                let tail = String((serverLogs[record.backend] ?? "").suffix(1500))
                 activeSpawned = nil
                 throw LocalAIError.startFailed(record.backend, tail.isEmpty ? "the server exited immediately" : tail)
             }
@@ -1474,7 +1616,48 @@ enum LocalAIError: LocalizedError {
         case .notInstalled(let backend):
             return "\(backend.displayName) isn't installed on this Mac. Install it (\(backend.installCommand)) — see Settings → \(backend.displayName)."
         case .startFailed(let backend, let detail):
+            // A model-load failure gets a plain-words headline BEFORE the
+            // raw server output — seen live with a quantization llama.cpp
+            // doesn't support yet ("invalid ggml type 42"), where the bare
+            // stderr tail read as a wall of paths and told the user nothing
+            // about what to actually do. The raw detail stays: it's what
+            // makes the failure diagnosable.
+            //
+            // Unknown-architecture and bad-quantization are different
+            // failures and need different advice: an unsupported ggml
+            // tensor type can genuinely be a single bad quant, so "try
+            // another quantization" is real advice — but an unrecognized
+            // *architecture* (seen live with PrismML's "dspark", a
+            // diffusion-style architecture llama.cpp has no code for at
+            // all) means every file in that repo shares the same
+            // architecture and will fail identically; telling someone to
+            // pick a different quant there is false hope.
+            if let architecture = Self.unsupportedArchitecture(in: detail) {
+                return """
+                \(backend.displayName) downloaded this model but can't run it — its architecture ("\(architecture)") isn't implemented in the \(backend.displayName) version on this Mac. This isn't a quantization problem: every file in this repo shares the same architecture, so a different quantization of the same model won't help. Pick a different model, or check back after updating \(backend.displayName) in case a later release adds support. You can remove this model in Settings → Models.
+
+                Server output:
+                \(detail)
+                """
+            }
+            if detail.contains("failed to load model") || detail.contains("invalid ggml type") {
+                return """
+                \(backend.displayName) downloaded this model but couldn't load it — the file's format or quantization isn't supported by the \(backend.displayName) version on this Mac. This is a property of the model file itself, not a download error: try a different quantization of the same model (the sliders icon next to its download button), another model, or updating \(backend.displayName). You can remove this model in Settings → Models.
+
+                Server output:
+                \(detail)
+                """
+            }
             return "\(backend.displayName) couldn't start: \(detail)"
         }
+    }
+
+    /// Pulls the architecture name out of llama.cpp's
+    /// `unknown model architecture: 'x'` line, if present.
+    private static func unsupportedArchitecture(in detail: String) -> String? {
+        guard let markerRange = detail.range(of: "unknown model architecture: '") else { return nil }
+        let afterMarker = detail[markerRange.upperBound...]
+        guard let endQuote = afterMarker.firstIndex(of: "'") else { return nil }
+        return String(afterMarker[afterMarker.startIndex..<endQuote])
     }
 }

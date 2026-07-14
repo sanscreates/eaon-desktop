@@ -64,7 +64,15 @@ struct CodeBlockView: View {
 
     @ViewBuilder
     private var codeText: some View {
-        let highlighted = SyntaxHighlighter.highlight(code, language: detectedLanguage, colors: colors)
+        // Memoized: highlighting re-ran on every body evaluation (every
+        // hover elsewhere in the row, every typewriter tick, every
+        // LazyVStack scroll-in) — a finished block's re-render is now a
+        // cache lookup. Still-streaming code (cursor showing) computes
+        // fresh each tick and skips storing, since its key changes every
+        // time anyway.
+        let highlighted = RenderCache.shared.value("hl|\(displayLanguage)|\(colors == .dark)|\(code)", store: !showTypingCursor) {
+            SyntaxHighlighter.highlight(code, language: detectedLanguage, colors: colors)
+        }
         if showTypingCursor {
             TimelineView(.periodic(from: .now, by: 0.5)) { context in
                 let cursorVisible = Int(context.date.timeIntervalSince1970 * 2) % 2 == 0

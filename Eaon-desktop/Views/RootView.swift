@@ -159,6 +159,14 @@ struct RootView: View {
                 .zIndex(20)
             }
 
+            if chatViewModel.isAskingToEnterAutoMode {
+                AutoModeConfirmationDialog(
+                    onConfirm: { chatViewModel.confirmEnterAutoMode() },
+                    onCancel: { chatViewModel.cancelEnterAutoMode() }
+                )
+                .zIndex(20)
+            }
+
             if let pending = conversationPendingRename {
                 RenameChatDialog(
                     conversation: pending,
@@ -293,17 +301,6 @@ struct RootView: View {
                     },
                     onModeChange: switchMode
                 )
-            case .mode(.imageStudio):
-                ImageStudioHomeView(
-                    viewModel: chatViewModel,
-                    isSidebarCollapsed: sidebarCollapsed,
-                    onExpandSidebar: { toggleSidebar() },
-                    onOpenProviderSettings: { selectionId in
-                        settingsInitialSelectionId = selectionId
-                        showingSettings = true
-                    },
-                    onModeChange: switchMode
-                )
             case .compare:
                 ModelCompareView(availableModels: chatViewModel.aquaOnlyChatModels)
             case .feature(.projects):
@@ -363,10 +360,10 @@ struct RootView: View {
         selection = .mode(chatViewModel.currentMode)
     }
 
-    /// The mode switcher (composer bar, plus the Eaon Claw/Image Studio
-    /// gate screens) only has a view onto `viewModel.currentMode` — it can't
-    /// see `selection`, which is what actually decides which top-level view
-    /// this window shows. This is the one place that keeps both in sync.
+    /// The mode switcher (composer bar, plus Eaon Claw's enable-gate screen)
+    /// only has a view onto `viewModel.currentMode` — it can't see
+    /// `selection`, which is what actually decides which top-level view this
+    /// window shows. This is the one place that keeps both in sync.
     private func switchMode(_ mode: EaonMode) {
         selection = .mode(mode)
     }

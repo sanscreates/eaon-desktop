@@ -15,6 +15,9 @@ struct LocalProviderSettingsView: View {
     @State private var repoInput = ""
     @State private var copiedInstallCommand = false
     @State private var recordPendingDeletion: LocalModelRecord?
+    /// Non-nil when a delete verifiably failed — see ModelLibraryView's
+    /// identical state for why this must be surfaced, never swallowed.
+    @State private var deletionFailureMessage: String?
 
     private var isInstalled: Bool { manager.installed.contains(backend) }
 
@@ -93,7 +96,14 @@ struct LocalProviderSettingsView: View {
             presenting: recordPendingDeletion
         ) { record in
             Button("Delete", role: .destructive) {
-                Task { await manager.deleteModel(record) }
+                Task {
+                    // Same verified-deletion reporting as ModelLibraryView —
+                    // a delete that didn't actually free the disk must say
+                    // so, not pretend.
+                    if let failure = await manager.deleteModel(record) {
+                        deletionFailureMessage = failure
+                    }
+                }
                 recordPendingDeletion = nil
             }
             Button("Cancel", role: .cancel) { recordPendingDeletion = nil }
@@ -101,6 +111,17 @@ struct LocalProviderSettingsView: View {
             Text(record.backend == .ollama
                  ? "\(record.displayName) will be removed from this Mac (frees \(record.detail.replacingOccurrences(of: " on this Mac", with: ""))). You can download it again anytime."
                  : "\(record.displayName) will be removed. Downloaded files in the app's models folder are deleted too.")
+        }
+        .alert(
+            "Couldn't delete the model",
+            isPresented: Binding(
+                get: { deletionFailureMessage != nil },
+                set: { if !$0 { deletionFailureMessage = nil } }
+            )
+        ) {
+            Button("OK") { deletionFailureMessage = nil }
+        } message: {
+            Text(deletionFailureMessage ?? "")
         }
     }
 
@@ -466,6 +487,10 @@ struct LocalProviderSettingsView: View {
                     .padding(.vertical, 3)
                     .background(colors.backgroundSubtle)
                     .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            }
+
+            if record.backend == .llamaCpp {
+                GPUModeMenu(manager: manager, record: record)
             }
 
             Button {

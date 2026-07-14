@@ -256,6 +256,77 @@ struct DesktopCallConfirmationDialog: View {
     }
 }
 
+// MARK: - Enter Auto mode confirmation (coding Agent)
+
+/// The are-you-sure gate before the coding Agent's Auto (unsandboxed) mode.
+/// Auto turns off the per-command confirmation entirely — the agent writes
+/// files and runs shell commands on the real Mac without asking each time —
+/// so switching *into* it (never out of it) is deliberately gated behind
+/// this. Amber, not red: it's a real, informed power-user choice, not a
+/// destructive action.
+struct AutoModeConfirmationDialog: View {
+    @Environment(\.themeColors) private var colors
+    let onConfirm: () -> Void
+    let onCancel: () -> Void
+
+    @State private var appeared = false
+    private let amber = Color(hex: "#F59E0B")
+
+    var body: some View {
+        ZStack {
+            colors.backgroundOverlay
+                .ignoresSafeArea()
+                .onTapGesture { onCancel() }
+
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(amber)
+                    Text("Switch to Auto mode?")
+                        .font(AppFont.mono(18, weight: .semibold))
+                        .foregroundStyle(colors.textPrimary)
+                }
+                .padding(.bottom, 12)
+
+                Text("In Auto mode, Eaon runs shell commands and writes files on your Mac **without asking each time**. It's faster for long coding tasks, but it means commands run the moment the agent decides to — including ones that overwrite or remove files.")
+                    .font(AppFont.sans(13))
+                    .foregroundStyle(colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 10)
+
+                Text("Only use it for a task you trust, and keep an eye on what it does. Press ⇧⇥ anytime to drop back to Sandboxed.")
+                    .font(AppFont.sans(13))
+                    .foregroundStyle(colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 22)
+
+                HStack(spacing: 10) {
+                    Spacer()
+                    DialogButton(title: "Cancel", style: .secondary) { onCancel() }
+                    DialogButton(title: "Enable Auto mode", style: .primary) { onConfirm() }
+                }
+            }
+            .padding(24)
+            .frame(width: 440)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(colors.backgroundPopover)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(colors.borderSubtle, lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.3), radius: 40, y: 16)
+            .scaleEffect(appeared ? 1 : 0.94)
+            .opacity(appeared ? 1 : 0)
+        }
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.18)) { appeared = true }
+        }
+    }
+}
+
 // MARK: - Delete chat dialog
 
 struct DeleteChatDialog: View {

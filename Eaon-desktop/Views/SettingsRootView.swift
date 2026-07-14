@@ -39,6 +39,7 @@ struct SettingsRootView: View {
         .init(id: "instructions", title: "Custom Instructions",  icon: "text.quote"),
         .init(id: "memory",       title: "Memory",                icon: "brain"),
         .init(id: "plugins",      title: "Plugins",                icon: "puzzlepiece.extension"),
+        .init(id: "skills",       title: "Skills",                 icon: "bolt.fill", isBeta: true),
         .init(id: "imageProviders", title: "Image Providers",     icon: "photo"),
         .init(id: "computer",     title: "Computer Control",       icon: "desktopcomputer", isBeta: true),
         .init(id: "localServer",  title: "Local API Server",      icon: "server.rack", isBeta: true),
@@ -139,6 +140,8 @@ struct SettingsRootView: View {
                         MemorySettingsView(chatViewModel: chatViewModel)
                     case "plugins":
                         PluginsSettingsView()
+                    case "skills":
+                        SkillsSettingsView()
                     case "imageProviders":
                         ImageProvidersSettingsView()
                     case "computer":

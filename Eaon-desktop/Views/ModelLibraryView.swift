@@ -28,6 +28,10 @@ struct ModelLibraryView: View {
     @State private var isSearchingHF = false
     @State private var searchTask: Task<Void, Never>?
     @State private var recordPendingDeletion: LocalModelRecord?
+    /// Non-nil when a delete VERIFIABLY failed (Ollama refused / file
+    /// still on disk) — shown as an alert, because silently pretending
+    /// the space was freed is the bug this exists to prevent.
+    @State private var deletionFailureMessage: String?
     /// Which Ollama categories are expanded — "Popular" open by default, the
     /// rest collapsed so 100+ models don't read as one giant wall.
     @State private var expandedCategories: Set<String> = ["Popular"]
@@ -112,6 +116,17 @@ struct ModelLibraryView: View {
         .sheet(isPresented: $showingInstallGuide) {
             LocalBackendsInstallSheet()
         }
+        .alert(
+            "Couldn't delete the model",
+            isPresented: Binding(
+                get: { deletionFailureMessage != nil },
+                set: { if !$0 { deletionFailureMessage = nil } }
+            )
+        ) {
+            Button("OK") { deletionFailureMessage = nil }
+        } message: {
+            Text(deletionFailureMessage ?? "")
+        }
     }
 
     // MARK: Model page links
@@ -131,6 +146,23 @@ struct ModelLibraryView: View {
         guard let url = URL(string: "https://huggingface.co/\(repo)") else { return }
         openWindow(value: url)
     }
+
+    // A featured card for PrismML's Bonsai 27B lived here briefly
+    // (2026-07-14). Removed the same day: downloading it works (verified —
+    // the file transfers byte-perfect), but loading it does NOT — its
+    // ternary/1-bit quantization uses a ggml tensor type (42) that this
+    // Mac's installed llama.cpp (Homebrew, build b9050) doesn't recognize
+    // yet ("invalid ggml type 42, should be in [0, 42)" — confirmed by
+    // loading the exact downloaded file directly with `llama-server`,
+    // bypassing the app entirely, to rule out an app-side bug first).
+    // PrismML ships a separate, non-Ollama/non-llama.cpp runtime
+    // specifically because of this — this app has no such runtime, and
+    // adding a "download" shortcut for a model that can't actually run
+    // once downloaded is the exact "UI promises something that doesn't
+    // happen" bug this app has been burned by before. Worth re-adding once
+    // ggml/llama.cpp upstream supports this quantization (or if this app
+    // ever integrates PrismML's own runtime) — re-verify from scratch at
+    // that point rather than assuming this note is still accurate.
 
     // MARK: Header
 
@@ -669,9 +701,17 @@ struct ModelLibraryView: View {
                                 .lineLimit(1)
                         }
                     } else {
-                        Text("\(Self.formatCount(result.downloads)) downloads · \(Self.formatCount(result.likes)) likes")
-                            .font(AppFont.mono(11))
-                            .foregroundColor(colors.textTertiary)
+                        // Size leads the line once it's known — "will this
+                        // fit on my disk / in my memory" is the first
+                        // question a real download decision asks, ahead of
+                        // popularity. (For GGUF it's the auto-picked file's
+                        // size; the quant picker shows each variant's own.)
+                        Text(
+                            (hfSizes[result.id].map { String(format: "%.1f GB · ", Double($0) / 1_000_000_000) } ?? "")
+                            + "\(Self.formatCount(result.downloads)) downloads · \(Self.formatCount(result.likes)) likes"
+                        )
+                        .font(AppFont.mono(11))
+                        .foregroundColor(colors.textTertiary)
                     }
                 }
                 .contentShape(Rectangle())
@@ -923,6 +963,10 @@ struct ModelLibraryView: View {
 
             chatButton(modelId: record.id)
 
+            if record.backend == .llamaCpp {
+                GPUModeMenu(manager: manager, record: record)
+            }
+
             Button {
                 recordPendingDeletion = record
             } label: {
@@ -939,7 +983,14 @@ struct ModelLibraryView: View {
     }
 
     private func deleteRecord(_ record: LocalModelRecord) {
-        Task { await manager.deleteModel(record) }
+        Task {
+            // Surface a verified failure instead of pretending — see
+            // `LocalAIManager.deleteModel`'s own doc for the live bug
+            // (models "deleted" in the UI, 20GB unchanged on disk).
+            if let failure = await manager.deleteModel(record) {
+                deletionFailureMessage = failure
+            }
+        }
     }
 
     // MARK: Shared bits

@@ -46,6 +46,14 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     /// messages decode fine without this key. Rendering shows this image
     /// large and prominent rather than as a small attachment thumbnail.
     var isGeneratedImage: Bool?
+    /// Set on a user message that invoked a skill via `/name` — the
+    /// hyphenated skill name, for the small badge shown above the bubble.
+    /// `content` itself is already the command-stripped text (see
+    /// `ChatViewModel.extractSkillInvocation`), so this is display-only;
+    /// nothing re-parses `content` looking for a slash command later.
+    /// Optional, like the other flags on this struct, so older persisted
+    /// messages decode fine without the key.
+    var invokedSkillName: String?
 }
 
 /// A single saved conversation, shown in the "Your chats" sidebar list.
@@ -120,9 +128,9 @@ class ChatViewModel {
     var messages: [ChatMessage] = []
     var inputText: String = ""
     var selectedModel: String = ""
-    /// The active top-level mode (Chat / Agent / Eaon Claw / Image Studio) —
-    /// drives which tools and teaching blocks the model gets and how long the
-    /// agent loop may run (see `mergedNativeTools`, `systemPromptHistory`,
+    /// The active top-level mode (Chat / Agent / Eaon Claw) — drives which
+    /// tools and teaching blocks the model gets and how long the agent loop
+    /// may run (see `mergedNativeTools`, `systemPromptHistory`,
     /// `maxAgentSteps`). Persisted so the app reopens in the same mode.
     var currentMode: EaonMode = .chat {
         didSet {
@@ -130,6 +138,17 @@ class ChatViewModel {
             UserDefaults.standard.set(currentMode.rawValue, forKey: Self.currentModeKey)
         }
     }
+    /// The coding Agent's permission state, toggled with Shift+Tab:
+    /// false = **Sandboxed** (the default — every command is confirmed
+    /// before it runs), true = **Auto** (unsandboxed — commands run without
+    /// asking). Deliberately NOT persisted: it resets to Sandboxed on every
+    /// launch, so a powerful "runs commands without asking" mode is never
+    /// silently in effect from a past session. Only consulted in Agent mode.
+    var agentAutoRun: Bool = false
+    /// Non-nil exactly while the "switch to Auto mode?" confirmation should
+    /// be showing — entering Auto (never leaving it) is gated behind an
+    /// explicit are-you-sure. See `requestAgentPermissionToggle`.
+    var isAskingToEnterAutoMode: Bool = false
     var availableModels: [APIModel] = []
     /// Aqua's hosted image-generation models — fetched separately from
     /// `availableModels` because `AquaSupportedModels` (behind
@@ -326,10 +345,12 @@ class ChatViewModel {
     /// Hard cap on agent-loop rounds per user message — prevents a runaway
     /// tool loop from re-posting the conversation forever. Eaon Claw gets a
     /// much larger budget: real on-device tasks ("sort my Downloads,"
-    /// "research this and open the top three results") legitimately take many
-    /// steps, where a coding or chat turn rarely needs more than a handful.
-    /// Both are still bounded — the user can also stop generation at any time.
-    private var maxAgentSteps: Int { currentMode == .claw ? 40 : 16 }
+    /// "research this and open the top three results") and real coding
+    /// ("build a snake game," where each write→run→fix cycle is several
+    /// steps) legitimately take many steps, where a plain chat turn rarely
+    /// needs more than a handful. All are still bounded — the user can also
+    /// stop generation at any time.
+    private var maxAgentSteps: Int { (currentMode == .claw || currentMode == .agent) ? 40 : 16 }
 
     // MARK: - Run confirmation (agent code execution is unsandboxed — see WorkspaceRunner)
 
@@ -428,6 +449,12 @@ class ChatViewModel {
     /// to remember against, so it always asks.
     private func confirmDesktopCallIfNeeded(tool: DesktopTool, arguments: [String: Any]) async -> Bool {
         if tool.isReadOnly { return true }
+        // The coding Agent's Sandboxed/Auto toggle (Shift+Tab). In Auto mode
+        // the user has explicitly opted out of per-command confirmation — the
+        // whole point of the toggle — so commands run without asking. In
+        // Sandboxed mode (the default) it falls through to the normal ask.
+        // Never applies in Eaon Claw, which always uses its own confirm flow.
+        if currentMode == .agent, agentAutoRun { return true }
         if let id = currentConversationId, approvedDesktopConversationIds.contains(id) { return true }
 
         pendingDesktopCallConfirmation = PendingDesktopCall(
@@ -458,6 +485,34 @@ class ChatViewModel {
     func respondToDesktopCallConfirmation(_ decision: DesktopConfirmDecision) {
         desktopCallConfirmationContinuation?.resume(returning: decision)
         desktopCallConfirmationContinuation = nil
+    }
+
+    // MARK: - Agent Sandboxed/Auto toggle (Shift+Tab)
+
+    /// Shift+Tab (or a click on the permission pill) in the coding Agent.
+    /// Leaving Auto → Sandboxed is always immediate — stepping toward the
+    /// safer state needs no ceremony. Entering Sandboxed → Auto is gated:
+    /// it pops the are-you-sure sheet rather than switching straight away,
+    /// since Auto means the agent runs commands and edits files on the real
+    /// disk without asking. No-op outside Agent mode.
+    func requestAgentPermissionToggle() {
+        guard currentMode == .agent else { return }
+        if agentAutoRun {
+            agentAutoRun = false
+        } else {
+            isAskingToEnterAutoMode = true
+        }
+    }
+
+    /// The are-you-sure sheet's confirm button.
+    func confirmEnterAutoMode() {
+        isAskingToEnterAutoMode = false
+        agentAutoRun = true
+    }
+
+    /// The are-you-sure sheet's cancel button (and its backdrop tap).
+    func cancelEnterAutoMode() {
+        isAskingToEnterAutoMode = false
     }
 
     func recordPreviewRuntimeError(_ text: String) {
@@ -670,10 +725,18 @@ class ChatViewModel {
 
         if let id = currentConversationId,
            let index = conversations.firstIndex(where: { $0.id == id }) {
-            conversations[index].messages = messages
-            conversations[index].updatedAt = Date()
-            if conversations[index].title == Conversation.placeholderTitle() {
-                conversations[index].title = Self.deriveTitle(from: messages)
+            // Only a REAL change bumps `updatedAt` — `selectConversation`
+            // calls `saveMessages()` unconditionally to flush the chat
+            // being switched AWAY from, and with nothing actually
+            // different there this used to still stamp "now" on it,
+            // reordering the sidebar's most-recent-first list on every
+            // click even though the user never typed anything.
+            if conversations[index].messages != messages {
+                conversations[index].messages = messages
+                conversations[index].updatedAt = Date()
+                if conversations[index].title == Conversation.placeholderTitle() {
+                    conversations[index].title = Self.deriveTitle(from: messages)
+                }
             }
         } else {
             let conversation = Conversation(
@@ -872,32 +935,17 @@ class ChatViewModel {
         refreshContextLimit()
     }
 
-    /// Switches mode from the sidebar. Image Studio needs an image model
-    /// selected to work, so entering it auto-selects the first available one
-    /// when the current pick is a chat model (and vice-versa on the way out),
-    /// sparing the user from having to know to change the model too.
+    /// Switches mode from the sidebar. An image model can still be selected
+    /// from the regular model picker regardless of mode — snapping back to a
+    /// chat model here means switching modes never strands the surface
+    /// unable to send.
     func enterMode(_ mode: EaonMode) {
         currentMode = mode
-        switch mode {
-        case .imageStudio:
-            let isImage = imageModels.contains { $0.id == selectedModel }
-            if !isImage, let first = imageModels.first {
-                selectModel(first.id)
-            }
-        case .chat, .agent, .claw:
-            // Leaving Image Studio with an image model still selected would
-            // leave the conversational modes unable to send — snap back to a
-            // chat model.
-            let isImage = imageModels.contains { $0.id == selectedModel }
-            if isImage, let first = chatModels.first {
-                selectModel(first.id)
-            }
+        let isImage = imageModels.contains { $0.id == selectedModel }
+        if isImage, let first = chatModels.first {
+            selectModel(first.id)
         }
     }
-
-    /// Whether any image model is configured — Image Studio shows setup
-    /// guidance instead of a dead model picker when this is false.
-    var hasImageModels: Bool { !imageModels.isEmpty }
 
     /// The active model's context limit — nil while unknown (an
     /// unrecognized cloud model, or a local one that hasn't reported yet),
@@ -1087,8 +1135,33 @@ class ChatViewModel {
         }
     }
 
+    /// A `/skill-name` invocation for the message currently being sent —
+    /// set fresh at the top of every `sendMessage()` call (including back
+    /// to `nil` when there's no leading slash command), so a skill applies
+    /// to the request it was invoked for and nothing after. Read by
+    /// `systemPromptHistory`.
+    private var activeSkillForTurn: Skill?
+
+    /// Detects a leading `/skill-name` in the user's raw input. The name
+    /// must be installed AND enabled (`SkillStore.skill(named:)` already
+    /// restricts to enabled), otherwise this is just an ordinary message
+    /// that happens to start with a slash. Returns the matched skill and
+    /// the text with that leading token removed; if the skill consumed the
+    /// entire message (nothing typed after it), a short generic fallback
+    /// stands in as the text so the turn still has something to send.
+    static func extractSkillInvocation(from text: String) -> (skill: Skill?, text: String) {
+        guard text.hasPrefix("/") else { return (nil, text) }
+        let withoutSlash = text.dropFirst()
+        let name = withoutSlash.prefix { !$0.isWhitespace }
+        guard !name.isEmpty, let skill = SkillStore.shared.skill(named: String(name)) else { return (nil, text) }
+        let rest = withoutSlash.dropFirst(name.count).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (skill, rest.isEmpty ? "Use the \"\(skill.name)\" skill." : rest)
+    }
+
     func sendMessage() async {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawInput = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (invokedSkill, text) = Self.extractSkillInvocation(from: rawInput)
+        activeSkillForTurn = invokedSkill
         let attachments = pendingAttachments
         guard (!text.isEmpty || !attachments.isEmpty), !isGenerating else { return }
 
@@ -1100,7 +1173,20 @@ class ChatViewModel {
         }
 
         guard !selectedModel.isEmpty, chatModels.contains(where: { $0.id == selectedModel }) else {
-            appendSystemError("No chat model selected. Wait for models to load from the Aqua API, then pick one from the menu.")
+            // This fires for any reason the selection doesn't resolve —
+            // still-loading, zero providers configured at all, or a stale
+            // selection left over from a deleted/hidden model — so the
+            // message must reflect which of those it actually is instead of
+            // always blaming Aqua specifically (chatModels merges Aqua,
+            // BYOK, and local models; most users hitting this have neither
+            // an Aqua key nor any Aqua models loaded).
+            if isLoadingModels {
+                appendSystemError("Still loading models — wait a moment, then pick one from the menu.")
+            } else if chatModels.isEmpty {
+                appendSystemError("No models available yet. Add a provider or API key in Settings, or download a local model from Settings → Models.")
+            } else {
+                appendSystemError("No chat model selected. Pick one from the model menu above.")
+            }
             return
         }
 
@@ -1128,7 +1214,7 @@ class ChatViewModel {
             apiKey = aquaKey
         }
 
-        let userMsg = ChatMessage(content: text, isUser: true, attachments: attachments)
+        let userMsg = ChatMessage(content: text, isUser: true, attachments: attachments, invokedSkillName: invokedSkill?.name)
         messages.append(userMsg)
         StatisticsTracker.shared.recordUserPrompt(modelId: selectedModel)
         inputText = ""
@@ -1226,9 +1312,28 @@ class ChatViewModel {
         apiKey: String
     ) {
         guard MemoryStore.shared.isEnabled, MemoryStore.shared.isAutoLearnEnabled else { return }
-        guard let lastUser = messages.last(where: { $0.isUser })?.content, !lastUser.isEmpty,
-              let lastAssistant = messages.last(where: { !$0.isUser && $0.isToolResult != true })?.content,
+        // `!isError` too — a turn that ended on the 3-strikes stop message
+        // used to feed that error text in as "what the assistant said,"
+        // polluting extraction with mechanical noise.
+        guard let lastUserIndex = messages.lastIndex(where: { $0.isUser }),
+              case let lastUser = messages[lastUserIndex].content, !lastUser.isEmpty,
+              let lastAssistant = messages.last(where: { !$0.isUser && $0.isToolResult != true && !$0.isError })?.content,
               !lastAssistant.isEmpty else { return }
+
+        // This turn's plugin/tool results ride along ONLY with the user's
+        // separate, off-by-default consent — plugin output routinely
+        // carries other people's information and content the user never
+        // typed. Capped like every other request-size guard in this app.
+        var toolContext: String?
+        if MemoryStore.shared.isPluginLearnEnabled {
+            let turnToolResults = messages[messages.index(after: lastUserIndex)...]
+                .filter { $0.isToolResult == true }
+                .map(\.content)
+                .joined(separator: "\n")
+            if !turnToolResults.isEmpty {
+                toolContext = String(turnToolResults.prefix(4000))
+            }
+        }
 
         let aquaApiKey = (customConfig == nil && localRecord == nil) ? apiKey : nil
         let modelId = selectedModel
@@ -1236,11 +1341,69 @@ class ChatViewModel {
             await MemoryExtractor.run(
                 userText: lastUser,
                 assistantText: lastAssistant,
+                toolContext: toolContext,
                 customConfig: customConfig,
                 localRecord: localRecord,
                 aquaApiKey: aquaApiKey,
                 modelId: modelId
             )
+        }
+    }
+
+    // MARK: - Learn memories from a user-chosen file
+
+    var isLearningFromFile = false
+
+    /// The heavy-consent path for file-based memory: by the time this is
+    /// called, the user has explicitly PICKED the file in an open panel
+    /// AND confirmed a dialog spelling out exactly what will be sent where
+    /// (see `MemorySettingsView`). Uses the same model routing as the
+    /// backfill; reports through `memoryBackfillStatus`, which that page
+    /// already displays.
+    func learnFromFile(url: URL) {
+        guard !isLearningFromFile, !isBackfillingMemory else { return }
+        guard !selectedModel.isEmpty else {
+            memoryBackfillStatus = "Pick a model in the chat first — learning uses whichever one is currently selected."
+            return
+        }
+
+        let customConfig = CustomProviderStore.shared.config(owning: selectedModel)
+        let localRecord = customConfig == nil ? LocalAIManager.shared.record(withId: selectedModel) : nil
+        var aquaApiKey: String?
+        if customConfig == nil, localRecord == nil {
+            guard let key = APIKeyStore.loadAPIKey(), !key.isEmpty else {
+                memoryBackfillStatus = "Add your Aqua API key first, or switch to a model that already has one."
+                return
+            }
+            aquaApiKey = key
+        }
+
+        let accessed = url.startAccessingSecurityScopedResource()
+        guard let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) else {
+            if accessed { url.stopAccessingSecurityScopedResource() }
+            memoryBackfillStatus = "Couldn't read \"\(url.lastPathComponent)\" as text."
+            return
+        }
+        if accessed { url.stopAccessingSecurityScopedResource() }
+
+        isLearningFromFile = true
+        memoryBackfillStatus = "Reading \"\(url.lastPathComponent)\"…"
+        let modelId = selectedModel
+        let fileName = url.lastPathComponent
+        Task {
+            do {
+                let added = try await MemoryExtractor.runOnFileText(
+                    text, fileName: fileName,
+                    customConfig: customConfig, localRecord: localRecord,
+                    aquaApiKey: aquaApiKey, modelId: modelId
+                )
+                memoryBackfillStatus = added > 0
+                    ? "Learned \(added) new thing\(added == 1 ? "" : "s") from \"\(fileName)\" — review below."
+                    : "Nothing new worth remembering was found in \"\(fileName)\"."
+            } catch {
+                memoryBackfillStatus = "Couldn't learn from \"\(fileName)\": \(error.localizedDescription)"
+            }
+            isLearningFromFile = false
         }
     }
 
@@ -1330,24 +1493,30 @@ class ChatViewModel {
     /// consults the map (see that function's doc comment).
     private static func mergedNativeTools(mode: EaonMode) -> NativeToolConfig? {
         let inClaw = mode == .claw && DesktopControlStore.shared.isEnabled
+        let inCodingAgent = mode == .agent
         var tools: [[String: Any]] = []
         var nameMap: [String: (server: String, tool: String)] = [:]
-        // Cloud plugins belong to Chat/Agent, not Eaon Claw — see
-        // `systemPromptHistory` for why loading them in Claw made a weaker
-        // model lose track of its device tools entirely.
-        if !inClaw, let mcpConfig = MCPConnectionStore.shared.nativeToolConfig {
+        // Cloud plugins belong to Chat, not the device-driving modes — see
+        // `systemPromptHistory` for why loading them alongside device tools
+        // made a weaker model lose track of those tools entirely. The coding
+        // Agent gets the same focused treatment: its own file/shell tools,
+        // not a dozen unrelated cloud plugins competing for attention.
+        if !inClaw, !inCodingAgent, let mcpConfig = MCPConnectionStore.shared.nativeToolConfig {
             tools += mcpConfig.tools
             nameMap = mcpConfig.nameMap
         }
         if WebSearchStore.shared.isEnabled {
             tools.append(WebSearchTool.nativeDefinition)
         }
-        // Device-control tools are exclusive to Eaon Claw — the mode whose
-        // whole purpose is driving this Mac. Even with the capability
-        // enabled in Settings, they're never offered in Chat/Agent, so those
-        // modes can't reach outside their lane.
+        // Eaon Claw gets the full device catalog (files, apps, browser). The
+        // coding Agent gets the focused coding subset (write/run/inspect) —
+        // enough to build software on the real disk, without the
+        // app/browser-driving tools that would dilute a smaller model's
+        // focus. Chat gets neither.
         if inClaw {
             tools.append(contentsOf: DesktopControlTool.nativeDefinitions)
+        } else if inCodingAgent {
+            tools.append(contentsOf: DesktopControlTool.codingNativeDefinitions)
         }
         guard !tools.isEmpty else { return nil }
         return NativeToolConfig(tools: tools, nameMap: nameMap)
@@ -1451,6 +1620,40 @@ class ChatViewModel {
         return object
     }
 
+    /// Source-code fence languages a model might use for a bare,
+    /// unattributed code block — the plainest possible way a chat-tuned
+    /// model "delivers" a file without ever calling a tool. Only consulted
+    /// in Agent mode, where that's a silent no-op the user experiences as
+    /// "it didn't write anything," not a harmless conversational aside.
+    private static let bareCodeFenceLanguages: Set<String> = [
+        "python", "py", "javascript", "js", "jsx", "typescript", "ts", "tsx",
+        "swift", "ruby", "rb", "go", "golang", "rust", "rs", "java", "kotlin",
+        "kt", "php", "sh", "bash", "zsh", "shell", "perl", "lua", "c", "cpp",
+        "c++", "html", "css",
+    ]
+
+    /// True when the reply contains a *complete* fenced code block in a
+    /// recognizable programming language with no `file=`/`path=`/`eaon:`
+    /// attribute at all — code the model printed instead of writing with a
+    /// real tool call. Deliberately requires a closed fence (a still-open
+    /// trailing one is skipped) since this only runs on finished text.
+    private static func containsBareCodeFence(_ text: String) -> Bool {
+        let parts = text.components(separatedBy: "```")
+        guard parts.count >= 3 else { return false }
+        var index = 1
+        while index < parts.count - 1 {
+            let body = parts[index]
+            let firstLine = body.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
+            let info = WorkspaceParser.fenceInfo(from: firstLine)
+            if info.path == nil, info.tool == nil, info.server == nil,
+               let language = info.language, bareCodeFenceLanguages.contains(language) {
+                return true
+            }
+            index += 2
+        }
+        return false
+    }
+
     /// Executes the run/edit/read/ls tools a reply requested, against a
     /// working snapshot that replays the reply's own events in order — so
     /// each tool sees exactly the file state the model had produced by that
@@ -1459,21 +1662,92 @@ class ChatViewModel {
         // assumeFinal: this text is DONE streaming, so a trailing block
         // with no closing fence is a model that stopped mid-fence, not a
         // stream still writing — execute it rather than dropping it.
+        // The same think-stripped view of the reply the parser itself works
+        // on — the fence-presence checks below must look at the same text,
+        // or a fence QUOTED inside the model's reasoning would trigger the
+        // "couldn't be parsed" error for a reply that made no call at all.
+        let visibleReply = WorkspaceParser.strippedOfThinking(replyText)
         let events = WorkspaceParser.events(from: replyText, assumeFinal: true)
         let hasActions = events.contains { event in
-            if case .write = event { return false }
+            // In Chat's sandboxed code workspace, a `.write` is inert on its
+            // own (no run/read/etc. alongside it) and shouldn't trip the
+            // "nothing happened" error below. In Agent mode there's no
+            // sandbox to fall back on — a bare file fence is a real, if
+            // wrongly-formatted, attempt to create a file (see the `.write`
+            // case below, which either saves it for real or explains why
+            // not), so it counts as an action here too.
+            if case .write = event { return currentMode == .agent }
             return true
         }
         guard hasActions else {
+            // A reply that is ONLY reasoning — a <think> span (closed or
+            // trailing off) with no visible text and no tool call after it.
+            // Observed live (Nemotron 3 Ultra, 2026-07-14): the model plans
+            // the next action INSIDE its thinking ("Now I'll create the
+            // HTML file…"), closes </think>, and stops. Ending the loop
+            // there reads as the agent silently giving up, and the user has
+            // to hand-type "continue" after every step. Bounce it back
+            // instead — the agentic contract is act or conclude, never just
+            // think — with a signature so three thinking-only turns in a
+            // row stop cleanly. Agent/Claw only: plain Chat has no loop to
+            // keep alive.
+            if currentMode == .agent || currentMode == .claw {
+                // Complete think spans are already gone from visibleReply;
+                // any "<think" still present is an unclosed span trailing
+                // to the end — ignore it for the emptiness check too.
+                var checkText = visibleReply
+                if let unclosed = checkText.range(of: "<think", options: .caseInsensitive) {
+                    checkText = String(checkText[..<unclosed.lowerBound])
+                }
+                if checkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let example = currentMode == .agent
+                        ? "```eaon:computer tool=\"write_file\"\n{\"path\": \"~/<project>/index.html\", \"content\": \"<!doctype html>\\n…the complete file…\"}\n```"
+                        : "```eaon:computer tool=\"list_directory\"\n{\"path\": \"~/Downloads\"}\n```"
+                    return AgentToolRun(
+                        results: "[Tool results — automated, not written by the user]\n\n### tool call\nERROR: your reply was only internal thinking — it ended with no visible text and no tool call, so NOTHING happened. Do not think again; ACT. Emit the next tool call now, as a fence at the start of its own line:\n\(example)\nAfter your reasoning you must always either call a tool or, when the task is finished, give the user a short plain-language answer.",
+                        failureSignature: "thinking-only-turn"
+                    )
+                }
+            }
+            // Agent mode specifically: the model printed source as a plain
+            // code block with no attribute of any kind (not even `file=`) —
+            // the single most natural thing a chat-tuned model does when
+            // asked to "build" something, and the one case with no `.write`
+            // event at all to hook into. Nothing was ever going to land on
+            // disk from this, so say so before the loop just quietly ends.
+            if currentMode == .agent, Self.containsBareCodeFence(visibleReply) {
+                return AgentToolRun(
+                    results: "[Tool results — automated, not written by the user]\n\n### tool call\nERROR: no tool was called, so nothing was created — a code block in the chat doesn't save to disk. If that was meant to be a file, write it for real:\n```eaon:computer tool=\"write_file\"\n{\"path\": \"~/project/main.py\", \"content\": \"print('hi')\\n\"}\n```\nAvailable tools: \(DesktopTool.codingTools.map(\.rawValue).joined(separator: ", ")).",
+                    failureSignature: "agent-code-no-tool-call"
+                )
+            }
             // The reply LOOKS like it attempted a tool call (an eaon:/
             // aqua: fence is present) but nothing parseable came out.
             // Returning nil here would end the loop with no reply and no
             // error — the model must instead be told the call didn't
-            // happen, so it can re-emit it correctly.
-            if replyText.contains("```eaon:") || replyText.contains("```aqua:") {
+            // happen, so it can re-emit it correctly. The re-emit example
+            // MUST match the mode's actual tools: telling a coding-Agent or
+            // Claw model to use the `eaon:mcp server="<server id>"` form
+            // (the old hardcoded text) made it copy that literal placeholder
+            // and spiral into "<server id> isn't a connected service." A
+            // real failureSignature is set now too, so an identical parse
+            // failure three times running stops the loop instead of burning
+            // steps until the gateway 502s.
+            if visibleReply.contains("```eaon:") || visibleReply.contains("```aqua:") {
+                let usesComputerTools = currentMode == .agent || currentMode == .claw
+                let example = usesComputerTools
+                    ? "```eaon:computer tool=\"write_file\"\n{\"path\": \"~/project/main.py\", \"content\": \"print('hi')\\n\"}\n```"
+                    : "```eaon:mcp server=\"<server id>\" tool=\"<tool name>\"\n{\"arg\": \"value\"}\n```"
+                // On its own line after the example's closing fence — glued
+                // to it, this hint itself modeled the exact
+                // text-on-the-fence-line mistake it was trying to correct.
+                let toolsHint = usesComputerTools
+                    ? "\nYour tools are called with `tool=\"<name>\"` on the fence line and a JSON body. Available tools: \(DesktopTool.codingTools.map(\.rawValue).joined(separator: ", ")). The opening ```eaon:computer must START its own line (nothing else before it on that line), the closing ``` goes on its own line, and every newline inside a JSON string is written as \\n."
+                    : ""
                 return AgentToolRun(
-                    results: "[Tool results — automated, not written by the user]\n\n### tool call\nERROR: a tool block in your reply couldn't be parsed, so nothing was executed. Re-emit it exactly as:\n```eaon:mcp server=\"<server id>\" tool=\"<tool name>\"\n{\"arg\": \"value\"}\n```\nwith the closing ``` fence on its own line.",
-                    failureSignature: nil
+                    results: "[Tool results — automated, not written by the user]\n\n### tool call\nERROR: a tool block in your reply couldn't be parsed, so nothing was executed. Re-emit it EXACTLY like this, with the closing ``` fence on its own line:\n\(example)\(toolsHint)",
+                    failureSignature: "unparseable-tool-block"
                 )
             }
             return nil
@@ -1497,6 +1771,42 @@ class ChatViewModel {
             case .write(let file):
                 if byPath[file.path] == nil { ordered.append(file.path) }
                 byPath[file.path] = file
+
+                // Agent mode has no ephemeral sandbox to fall back on — a
+                // plain `file="..."` fence or the `eaon:write` shorthand is
+                // a real attempt to create a file, just via the wrong fence
+                // (the app's own workspace panel re-derives from every
+                // assistant message regardless of mode, so it would show
+                // this file as if it existed — a UI promise the disk never
+                // kept unless it lands here). `sanitizePath` always strips a
+                // leading "/" from a truly absolute path (so one can never
+                // be told apart from a bare relative one), but it leaves a
+                // leading "~/" untouched — an unambiguous signal the model
+                // meant a real, home-anchored location. Only that case is
+                // safe to auto-promote to a real write; anything else is
+                // told what's missing instead of guessing a location.
+                guard currentMode == .agent else { continue }
+                guard file.path.hasPrefix("~/") else {
+                    sections.append("### \(file.fileName)\nERROR: this only rendered in the chat's preview — nothing was saved to disk, since the path wasn't anchored to a real location. Save it for real with an absolute path under your project folder:\n```eaon:computer tool=\"write_file\"\n{\"path\": \"~/<project-folder>/\(file.fileName)\", \"content\": \"<same file content, every line break as \\n>\"}\n```")
+                    failureSignature = "agent-plain-write-\(file.path)"
+                    WorkspaceRunner.shared.note("✗ \(file.path) — not saved (no absolute path)\n", kind: .stderr)
+                    continue
+                }
+                guard await confirmDesktopCallIfNeeded(tool: .writeFile, arguments: ["path": file.path, "content": file.content]) else {
+                    sections.append("### \(file.path)\nSkipped — you didn't allow this action.")
+                    WorkspaceRunner.shared.note("✗ computer: Write file — not allowed\n", kind: .stderr)
+                    continue
+                }
+                agentActivityText = "Running \(DesktopTool.writeFile.displayName)…"
+                defer { agentActivityText = nil }
+                let writeResult = await DesktopControlService.execute(tool: .writeFile, arguments: ["path": file.path, "content": file.content])
+                if writeResult.isError {
+                    sections.append("### \(file.path)\nERROR:\n\(Self.boundedToolResultText(writeResult.text))")
+                    WorkspaceRunner.shared.note("✗ computer: Write file\n", kind: .stderr)
+                } else {
+                    sections.append("### \(file.path)\nOK:\n\(Self.boundedToolResultText(writeResult.text))")
+                    WorkspaceRunner.shared.note("✓ computer: Write file (\(file.path))\n", kind: .status)
+                }
 
             case .edit(let path, let payload):
                 guard let payload else {
@@ -1660,13 +1970,23 @@ class ChatViewModel {
 
             case .computerCall(let toolName, let argumentsJSON):
                 // Same belt-and-suspenders as web search: the teaching block
-                // and native definitions are withheld outside Eaon Claw, but
-                // a model can still imitate the fence from history — refuse
-                // rather than act. Device control requires BOTH the mode
-                // (Eaon Claw) and the capability being enabled, so a computer
-                // call replayed while the user is in Chat/Agent can't fire.
-                guard currentMode == .claw, DesktopControlStore.shared.isEnabled else {
-                    sections.append("### computer\nERROR: device control only runs in Eaon Claw, and only once it's enabled — nothing was done.")
+                // and native definitions are withheld outside the modes that
+                // use them, but a model can still imitate the fence from
+                // history — refuse rather than act. Device/coding calls run in
+                // exactly two places: Eaon Claw (full catalog, capability
+                // enabled) and the coding Agent (its focused subset). A call
+                // replayed while the user is in plain Chat can't fire.
+                let inClawExec = currentMode == .claw && DesktopControlStore.shared.isEnabled
+                let inCodingAgentExec = currentMode == .agent
+                guard inClawExec || inCodingAgentExec else {
+                    sections.append("### computer\nERROR: this tool only runs in Eaon Claw (once enabled) or the coding Agent — nothing was done.")
+                    continue
+                }
+                // In the coding Agent, keep the model on its own tools — a
+                // replayed app/browser-driving fence from a past Claw chat
+                // shouldn't execute here.
+                if inCodingAgentExec, let toolName, let t = DesktopControlTool.tool(named: toolName), !DesktopTool.codingTools.contains(t) {
+                    sections.append("### \(toolName)\nERROR: \"\(toolName)\" isn't one of the coding Agent's tools — use \(DesktopTool.codingTools.map(\.rawValue).joined(separator: ", ")).")
                     continue
                 }
                 guard let toolName else {
@@ -1679,7 +1999,16 @@ class ChatViewModel {
                     continue
                 }
                 guard let arguments = Self.parseJSONObject(argumentsJSON) else {
-                    sections.append("### \(toolName)\nERROR: the block body wasn't a valid JSON object — nothing was done.")
+                    // The #1 cause, especially for write_file with real code:
+                    // literal line breaks inside a JSON string. Say so
+                    // explicitly and set a failure signature so the same
+                    // mistake three times running stops the loop instead of
+                    // grinding to a gateway 502.
+                    let hint = tool == .writeFile
+                        ? " For write_file, the whole file goes in \"content\" as ONE JSON string with every line break written as \\n (not a real newline), and inner quotes as \\\". Example: {\"path\": \"~/p/main.py\", \"content\": \"import sys\\nprint('hi')\\n\"}"
+                        : " Put the arguments as one valid JSON object, escaping any newline inside a string as \\n."
+                    sections.append("### \(toolName)\nERROR: the block body wasn't valid JSON — nothing was done.\(hint)")
+                    failureSignature = "computer-badjson-\(toolName)"
                     continue
                 }
                 let missingArgs = tool.requiredParameterNames.filter { arguments[$0] == nil }
@@ -1734,18 +2063,42 @@ class ChatViewModel {
             entries.append(HistoryTurn(role: "system", content: trimmed))
         }
 
-        if MemoryStore.shared.isEnabled, !MemoryStore.shared.memories.isEmpty {
-            let facts = MemoryStore.shared.memories.map { "- \($0.text)" }.joined(separator: "\n")
-            entries.append(HistoryTurn(role: "system", content: "What you remember about this user from earlier conversations:\n\(facts)"))
+        // The memory briefing — facts plus recent dated happenings, with
+        // guidance to use them like a person would (follow up on how
+        // something went) rather than recite them. Composed in
+        // `MemoryStore.promptBlock`, which also handles the caps and the
+        // 30-day event window so old happenings age out of prompts
+        // naturally.
+        if let memoryBlock = MemoryStore.shared.promptBlock() {
+            entries.append(HistoryTurn(role: "system", content: memoryBlock))
         }
 
-        // Connected cloud plugins (GitHub, Notion, …) belong to Chat and
-        // Agent, NOT Eaon Claw. Claw is deliberately about *this Mac*; loading
-        // a dozen unrelated cloud tools there buried the device tools so badly
-        // that the model listed its cloud plugins and forgot it could see the
-        // screen. Keeping Claw's tool set to device + browser + web search is
-        // what makes it reliable.
-        if !inClaw, let mcpInstruction = MCPConnectionStore.shared.agentInstructionBlock {
+        // Chat's OWN dormant code-workspace feature (file explorer, editor,
+        // console, live website preview — already fully built on the
+        // execution side, see `WorkspaceParser`/`WorkspaceRunner`) had no
+        // system prompt of its own at all, so a Chat-mode "make me a
+        // website mockup" got zero guidance on how to present it — observed
+        // live wandering toward "I'll use the deploy_to_vercel tool" instead
+        // of just writing the code. Placed BEFORE the connected-services
+        // catalog just below so a model anchors on "I can write real code
+        // right here" before it reads about GitHub/Vercel/etc. — the same
+        // primacy lesson already learned for Claw's identity preamble.
+        if currentMode == .chat {
+            entries.append(HistoryTurn(role: "system", content: WorkspaceParser.systemInstruction))
+        }
+
+        // Connected cloud plugins (GitHub, Notion, …) belong to Chat ONLY —
+        // not the coding Agent, not Eaon Claw. Both of those are about *this
+        // Mac*, and their tool sets are withheld from the native tools array
+        // there (see `mergedNativeTools`); sending the plugin *catalog* in
+        // the prompt anyway was a real bug — the model was told "you have
+        // GitHub, Cloudflare, Supabase, Notion, Vercel" while those tools
+        // weren't actually offered, and the catalog's bulk buried the coding
+        // instructions so thoroughly that a model (GLM) decided the whole
+        // system prompt was just "setup messages" with no real task in it.
+        // Keeping Agent's prompt to coding tools + web search, and Claw's to
+        // device + browser + web search, is what keeps them on task.
+        if currentMode == .chat, let mcpInstruction = MCPConnectionStore.shared.agentInstructionBlock {
             entries.append(HistoryTurn(role: "system", content: mcpInstruction))
         }
 
@@ -1758,13 +2111,15 @@ class ChatViewModel {
             entries.append(HistoryTurn(role: "system", content: WebSearchTool.agentInstructionBlock()))
         }
 
-        // Agent mode turns the model into the sandboxed coding agent — the
-        // eaon:run/edit/read/ls workspace protocol. Scoped to Agent mode
-        // (not sent in Chat), so ordinary conversation is never steered by
-        // it; this is the deliberate, mode-selected version of the old
-        // always-on coding prompt.
+        // Agent mode is the real coding agent: it writes real files to the
+        // user's disk, runs them, and iterates — using the same device engine
+        // as Eaon Claw, but a coding-focused tool subset and framing. Scoped
+        // to Agent mode (not sent in Chat), so ordinary conversation is never
+        // steered by it. Whether each command is confirmed or auto-runs is the
+        // user's Sandboxed/Auto toggle (`agentAutoRun`), handled in
+        // `confirmDesktopCallIfNeeded` — the prompt is identical either way.
         if currentMode == .agent {
-            entries.append(HistoryTurn(role: "system", content: WorkspaceParser.systemInstruction))
+            entries.append(HistoryTurn(role: "system", content: DesktopControlTool.codingInstructionBlock()))
         }
 
         // Eaon Claw's device-control teaching + browser how-to + the
@@ -1775,6 +2130,20 @@ class ChatViewModel {
         if inClaw {
             entries.append(HistoryTurn(role: "system", content: DesktopControlTool.agentInstructionBlock()))
             entries.append(HistoryTurn(role: "system", content: Self.clawBrowserInstructionBlock))
+        }
+
+        // A one-off `/skill-name` invocation for the message this request
+        // is sending — set fresh per turn in `sendMessage()`, not a
+        // persisted setting, so it applies to the request it was invoked
+        // for and nothing after. Last, regardless of mode: an explicit,
+        // deliberate per-message request from the user should be the
+        // freshest thing before their actual message, the same recency
+        // reasoning already applied to Claw's tool detail above.
+        if let activeSkillForTurn {
+            entries.append(HistoryTurn(
+                role: "system",
+                content: "The user has explicitly invoked the \"\(activeSkillForTurn.name)\" skill for this request — follow its instructions:\n\n\(activeSkillForTurn.instructions)"
+            ))
         }
 
         return entries
@@ -1922,6 +2291,11 @@ class ChatViewModel {
 
         var history: [HistoryTurn] = systemPromptHistory
         history += messages.dropLast().map { historyTurn(for: $0) }
+        // Local servers render the model's own embedded chat template,
+        // which is frequently strict about history shape — see
+        // `flattenedForStrictChatTemplates`' own doc for the live failure
+        // this prevents. Cloud paths deliberately don't do this.
+        history = history.flattenedForStrictChatTemplates
 
         let ephemeralConfig = CustomProviderConfig(
             brand: ModelCatalog.brand(for: record.requestModelId),
@@ -1969,7 +2343,17 @@ class ChatViewModel {
     /// still gets the plain "[Attached: x]" text so nothing is silently
     /// dropped.
     private func apiContent(for message: ChatMessage, sentImages: [MessageAttachment]) -> String {
-        let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A reasoning model's <think> spans belong to the turn they were
+        // produced in — sending them back in history bloats every request
+        // and, worse, shows the model its own past formatting mistakes as
+        // precedent to imitate (the glued `</think>```eaon:` habit compounds
+        // turn over turn). Every reasoning-model vendor's guidance is the
+        // same: strip prior thinking from history. Display is untouched —
+        // the saved message keeps its spans; this only shapes what's sent.
+        let raw = message.isUser || message.isToolResult == true
+            ? message.content
+            : WorkspaceParser.strippedOfThinking(message.content)
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let remaining = message.attachments.filter { attachment in
             !sentImages.contains { $0.id == attachment.id }
         }
@@ -2111,6 +2495,13 @@ class ChatViewModel {
         }
     }
 
+    /// Floor between streaming workspace re-derivations — see
+    /// `setAssistantMessageContent`. 10Hz is visually indistinguishable
+    /// from per-tick for a typing effect, and the final exact state is
+    /// guaranteed regardless by the unconditional
+    /// `refreshWorkspace(streaming: false)` in `sendMessage`'s epilogue.
+    private var lastStreamingWorkspaceRefresh = Date.distantPast
+
     private func setAssistantMessageContent(id: UUID, content: String) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[index].content = content
@@ -2119,9 +2510,17 @@ class ChatViewModel {
         // response to finish.
         if !content.isEmpty { loadingStatusText = nil }
         // Live-update the workspace as file blocks stream in, so code types
-        // into the panel's editor in real time.
+        // into the panel's editor in real time. Throttled to 10Hz: this
+        // callback fires on EVERY typewriter tick (as often as every ~3ms
+        // under backlog), and `files(fromMessages:)` re-line-scans every
+        // fence-carrying message in the conversation each call — measured
+        // as a major share of the full-core burn during agent streaming.
         if WorkspaceParser.mightContainFiles(content) {
-            refreshWorkspace(streaming: true)
+            let now = Date()
+            if now.timeIntervalSince(lastStreamingWorkspaceRefresh) >= 0.1 {
+                lastStreamingWorkspaceRefresh = now
+                refreshWorkspace(streaming: true)
+            }
         }
     }
 

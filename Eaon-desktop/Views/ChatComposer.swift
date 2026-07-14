@@ -6,8 +6,8 @@ struct ChatComposer: View {
     @Environment(\.themeColors) private var colors
     @Bindable var viewModel: ChatViewModel
     /// Lets the mode switcher tell the window's root which surface to show —
-    /// switching to/from Eaon Claw or Image Studio swaps the whole view, not
-    /// just `viewModel.currentMode`. See `ModeSegmentedControl`.
+    /// switching to/from Eaon Claw swaps the whole view, not just
+    /// `viewModel.currentMode`. See `ModeSegmentedControl`.
     var onModeChange: (EaonMode) -> Void = { _ in }
     @FocusState private var isFocused: Bool
     @State private var editorHeight: CGFloat = GrowingMessageField.minHeight
@@ -62,6 +62,21 @@ struct ChatComposer: View {
 
     // MARK: - Composer pill
 
+    /// Matching skill names for the `/` autocomplete popover — only while
+    /// the composer is a bare leading slash command with nothing sent yet
+    /// (no space typed after the name), so it disappears the moment the
+    /// user starts writing their actual message. Disabled (not just
+    /// invisible) skills never match — there's nothing useful about
+    /// autocompleting to a skill the model would then ignore.
+    private var skillAutocompleteMatches: [Skill] {
+        let text = viewModel.inputText
+        guard text.hasPrefix("/"), !text.contains(where: \.isWhitespace) else { return [] }
+        let query = String(text.dropFirst()).lowercased()
+        let enabled = SkillStore.shared.enabledSkills
+        guard !query.isEmpty else { return enabled }
+        return enabled.filter { $0.name.contains(query) }
+    }
+
     private var pill: some View {
         VStack(spacing: 0) {
             if !viewModel.pendingAttachments.isEmpty {
@@ -71,12 +86,21 @@ struct ChatComposer: View {
                 .padding(.top, 14)
             }
 
+            if !skillAutocompleteMatches.isEmpty {
+                SkillAutocompletePopover(skills: skillAutocompleteMatches) { skill in
+                    viewModel.inputText = "/\(skill.name) "
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 14)
+            }
+
             // Row 1 — text area on its own line, spanning the full width.
             GrowingMessageField(
                 text: $viewModel.inputText,
                 isFocused: $isFocused,
                 height: $editorHeight,
                 onSend: sendIfPossible,
+                onShiftTab: { viewModel.requestAgentPermissionToggle() },
                 placeholder: composerPlaceholder
             )
             .padding(.horizontal, 18)
@@ -98,6 +122,15 @@ struct ChatComposer: View {
                     }
                     .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .leading)))
                 }
+                // The coding Agent's permission pill — unlike the mode
+                // switcher, it stays visible during the conversation (you
+                // toggle Sandboxed/Auto while coding, not just before).
+                if viewModel.currentMode == .agent {
+                    AgentPermissionPill(isAuto: viewModel.agentAutoRun) {
+                        viewModel.requestAgentPermissionToggle()
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .leading)))
+                }
                 Spacer(minLength: 0)
                 trailingControls
             }
@@ -105,6 +138,8 @@ struct ChatComposer: View {
             .padding(.top, 8)
             .padding(.bottom, 12)
             .animation(.easeOut(duration: 0.18), value: viewModel.messages.isEmpty)
+            .animation(.easeOut(duration: 0.18), value: viewModel.currentMode)
+            .animation(.spring(duration: 0.28, bounce: 0.18), value: viewModel.agentAutoRun)
         }
         .background(
             RoundedRectangle(cornerRadius: 26, style: .continuous)
@@ -231,12 +266,102 @@ struct ChatComposer: View {
     }
 }
 
+/// The `/` slash-command picker — appears above the composer the moment
+/// the whole input is a bare, unfinished `/name` with no space typed after
+/// it yet, listing every enabled skill whose name contains what's typed so
+/// far (or all of them, for a bare `/`). Picking one fills in `/name ` so
+/// the user's cursor lands ready to type the actual request; typing past
+/// the name (a space) dismisses it the same way any slash-command UI does.
+private struct SkillAutocompletePopover: View {
+    @Environment(\.themeColors) private var colors
+    let skills: [Skill]
+    let onPick: (Skill) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(skills.prefix(6).enumerated()), id: \.element.id) { index, skill in
+                if index > 0 {
+                    Divider().overlay(colors.borderSubtle)
+                }
+                Button {
+                    onPick(skill)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(colors.textTertiary)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("/\(skill.name)")
+                                .font(AppFont.mono(12.5, weight: .semibold))
+                                .foregroundColor(colors.textPrimary)
+                            Text(skill.summary)
+                                .font(AppFont.sans(11))
+                                .foregroundColor(colors.textTertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .background(colors.backgroundElevated)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.borderSubtle, lineWidth: 1))
+        .shadow(color: colors.shadowColor.opacity(0.2), radius: 8, y: 3)
+    }
+}
+
+/// The coding Agent's Sandboxed/Auto permission indicator, in the composer.
+/// Tap it (or press Shift+Tab) to cycle. Light purple for the safe,
+/// ask-before-each-command default; amber for the opted-into,
+/// runs-without-asking Auto state. The colour shift alone signals which
+/// state you're in at a glance — the same at-a-glance safety cue a code
+/// editor's mode line gives.
+private struct AgentPermissionPill: View {
+    @Environment(\.themeColors) private var colors
+    let isAuto: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    private var tint: Color { isAuto ? Color(hex: "#F59E0B") : Color(hex: "#A78BFA") }
+    private var label: String { isAuto ? "Auto" : "Sandboxed" }
+    private var icon: String { isAuto ? "bolt.fill" : "lock.shield.fill" }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(label)
+                    .font(AppFont.mono(11, weight: .medium))
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(tint.opacity(isHovered ? 0.24 : 0.16)))
+            .overlay(Capsule().stroke(tint.opacity(0.45), lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(PressableButtonStyle())
+        .onHover { isHovered = $0 }
+        .help(isAuto
+            ? "Auto — Eaon runs commands and writes files without asking. Press ⇧⇥ to return to Sandboxed."
+            : "Sandboxed — Eaon asks before each command. Press ⇧⇥ to switch to Auto.")
+    }
+}
+
 private struct GrowingMessageField: View {
     @Environment(\.themeColors) private var colors
     @Binding var text: String
     var isFocused: FocusState<Bool>.Binding
     @Binding var height: CGFloat
     var onSend: () -> Void
+    var onShiftTab: () -> Void = {}
     var placeholder: String = "Ask anything"
 
     static let minHeight: CGFloat = 46
@@ -259,6 +384,7 @@ private struct GrowingMessageField: View {
                     text: $text,
                     isFocused: isFocused,
                     onSend: onSend,
+                    onShiftTab: onShiftTab,
                     textColor: colors.textPrimary
                 )
                 .padding(.horizontal, 2)
@@ -300,6 +426,7 @@ private struct EnterToSendTextEditor: NSViewRepresentable {
     @Binding var text: String
     var isFocused: FocusState<Bool>.Binding
     var onSend: () -> Void
+    var onShiftTab: () -> Void = {}
     var textColor: Color
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -312,6 +439,7 @@ private struct EnterToSendTextEditor: NSViewRepresentable {
         let textView = EnterSendingTextView()
         textView.delegate = context.coordinator
         textView.onSend = onSend
+        textView.onShiftTab = onShiftTab
         configure(textView)
 
         scrollView.documentView = textView
@@ -322,6 +450,7 @@ private struct EnterToSendTextEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
         textView.onSend = onSend
+        textView.onShiftTab = onShiftTab
         applyColors(to: textView)
         if textView.string != text { textView.string = text }
         if isFocused.wrappedValue, scrollView.window?.firstResponder != textView {
@@ -378,6 +507,10 @@ private struct EnterToSendTextEditor: NSViewRepresentable {
 
 private final class EnterSendingTextView: NSTextView {
     var onSend: (() -> Void)?
+    /// Shift+Tab — cycles the coding Agent's Sandboxed/Auto permission
+    /// state. A no-op closure outside Agent mode (the view model gates it),
+    /// so it's safe to always intercept here.
+    var onShiftTab: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
         let isReturnKey = event.keyCode == 36 || event.keyCode == 76
@@ -387,6 +520,12 @@ private final class EnterSendingTextView: NSTextView {
             } else {
                 onSend?()
             }
+            return
+        }
+        // Tab (keyCode 48) with Shift held → permission toggle. Swallowed so
+        // it never inserts a literal tab or moves focus.
+        if event.keyCode == 48, event.modifierFlags.contains(.shift) {
+            onShiftTab?()
             return
         }
         super.keyDown(with: event)

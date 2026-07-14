@@ -40,10 +40,16 @@ struct WorkspaceFile: Identifiable, Equatable {
 /// code blocks.
 enum WorkspaceParser {
     /// The instruction that turns any chat model into the workspace's coding
-    /// agent. Sent as a system message with every request; it scopes itself
-    /// to code-project asks so ordinary conversation is unaffected. The tool
-    /// protocol is plain fenced-text (not native API tool-calling) so it
-    /// works identically over Aqua and every BYOK wire format.
+    /// agent. Sent as a system message with every Chat-mode request (see
+    /// `ChatViewModel.systemPromptHistory`) — it scopes itself to code-project
+    /// asks so ordinary conversation is unaffected. The tool protocol is
+    /// plain fenced-text (not native API tool-calling) so it works
+    /// identically over Aqua and every BYOK wire format. (This text existed
+    /// for a while without actually being wired into any request — Chat mode
+    /// had no coding instruction of its own at all, so a model asked to
+    /// "make a website mockup" got zero guidance on how to present it and,
+    /// observed live, sometimes reached for a connected service like GitHub
+    /// or Vercel instead of just writing the code. Fixed 2026-07-14.)
     static let systemInstruction = """
     You are the coding agent inside Eaon, a desktop app with a live code workspace panel beside the chat: a file explorer, an editor, a console, and a browser preview for websites.
 
@@ -84,7 +90,7 @@ enum WorkspaceParser {
     After your reply, any eaon:run / eaon:edit / eaon:read / eaon:ls tools execute automatically and their results come back to you in a message beginning "[Tool results". You then continue — this loops until you reply with no tools.
 
     WORKFLOW for coding requests
-    1. One short paragraph saying what you'll build. No long plans.
+    1. One short paragraph saying what you'll build. No long plans. Default to writing it directly, right here, this way — even when a connected service (GitHub, Vercel, Supabase, …) could also do this, don't reach for one unless the user specifically asks you to push, deploy, or connect somewhere.
     2. Write ALL the files, complete from first line to last — never "rest unchanged", never placeholder comments.
     3. Scripts: run the entry file with eaon:run, read the result, and if it failed, fix the file (eaon:edit or a full rewrite) and run again — iterate until it exits cleanly. Websites: skip running; they preview automatically.
     4. Finish with a 1–3 sentence summary.
@@ -136,6 +142,55 @@ enum WorkspaceParser {
         case computerCall(tool: String?, argumentsJSON: String)
     }
 
+    /// Matches a complete `<think>…</think>` / `<thinking>…</thinking>`
+    /// span — the inline reasoning trace models like Nemotron and DeepSeek
+    /// emit before their answer.
+    private static let thinkSpanRegex = try! NSRegularExpression(
+        pattern: "<think>[\\s\\S]*?</think>|<thinking>[\\s\\S]*?</thinking>",
+        options: [.caseInsensitive]
+    )
+
+    /// Removes completed reasoning spans, replacing each with a newline.
+    ///
+    /// Two real failure modes force this (both captured live from Nemotron
+    /// 3 Ultra transcripts, 2026-07-13):
+    /// 1. The model glues its opening fence to the reasoning close —
+    ///    `…game.</think>```eaon:computer tool="run_shell"` — so the
+    ///    line-based scan below never sees a line *starting* with ``` and
+    ///    the whole call is lost ("couldn't be parsed", three strikes,
+    ///    stop). Replacing the span with a NEWLINE (not "") is what heals
+    ///    this: the fence lands back at the start of its own line. It also
+    ///    heals think-spans that *start* mid-line ("Sure.<think>…").
+    /// 2. A fence QUOTED inside the reasoning ("the error says it needs:
+    ///    ```eaon:mcp server=…") would otherwise parse as a real call and
+    ///    fire phantom tool executions from the model's inner monologue.
+    ///
+    /// An unclosed span (mid-stream, still thinking) is left untouched —
+    /// there's no way to know where it ends yet, and execution only ever
+    /// happens on finished text.
+    static func strippedOfThinking(_ text: String) -> String {
+        // Cheap gate: the regex only runs on text that can possibly match.
+        guard text.contains("</think") || text.contains("</THINK") || text.contains("</Think") else { return text }
+        let range = NSRange(text.startIndex..., in: text)
+        return thinkSpanRegex.stringByReplacingMatches(in: text, range: range, withTemplate: "\n")
+    }
+
+    /// Fence languages that unambiguously name a tool call even when the
+    /// model drops the `eaon:` prefix — observed live: ```computer
+    /// tool="run_shell" (Nemotron, after several failed retries). None of
+    /// these collide with a real programming-language fence tag, so
+    /// honoring them costs nothing and rescues an otherwise silently
+    /// dropped call. Bare tool names (```run_shell) route through the same
+    /// shorthand mapping the eaon:-prefixed kinds already use. Not private:
+    /// `AssistantMessageContentView` recognizes the same shorthand for
+    /// *display* (the request chip/diff card), so a call that executes
+    /// correctly is never shown as raw, unrecognized code.
+    static func prefixlessToolKind(_ language: String) -> String? {
+        if language == "computer" || language == "mcp" { return language }
+        if DesktopTool(rawValue: language) != nil { return language }
+        return nil
+    }
+
     /// Single line-scan state machine over one message's text. A file block
     /// missing its closing fence (mid-stream) yields `isComplete == false`;
     /// incomplete run/read/ls/mcp blocks are dropped entirely so a
@@ -148,7 +203,8 @@ enum WorkspaceParser {
     /// agent loop passes true so those calls execute instead of being
     /// silently dropped (which ended the whole loop with no reply and no
     /// error — the "model goes quiet after a tool call" bug).
-    static func events(from text: String, assumeFinal: Bool = false) -> [Event] {
+    static func events(from rawText: String, assumeFinal: Bool = false) -> [Event] {
+        let text = strippedOfThinking(rawText)
         enum Mode {
             case outside
             case plainFence
@@ -204,14 +260,23 @@ enum WorkspaceParser {
                         events.append(.computerCall(tool: toolName, argumentsJSON: bodyLines.joined(separator: "\n")))
                     }
                 default:
-                    // A natural model mistake: naming the service as the
-                    // kind itself (```eaon:github tool="x") instead of
-                    // ```eaon:mcp server="github". The intent is
-                    // unambiguous when a tool attribute is present, so
-                    // accept it — a wrong guess still dies with a clear
-                    // "unknown service" error fed back to the model,
-                    // instead of the whole call being silently dropped.
-                    if complete, let toolName {
+                    guard complete else { break }
+                    // A very common model shorthand: naming the tool as the
+                    // kind itself — ```eaon:write_file or ```eaon:run_shell
+                    // — instead of the canonical ```eaon:computer
+                    // tool="write_file". If the kind is a real device/coding
+                    // tool, honor it as a computer call rather than dropping
+                    // it (which is what forced the "couldn't be parsed" loop).
+                    if DesktopTool(rawValue: kind) != nil {
+                        events.append(.computerCall(tool: kind, argumentsJSON: bodyLines.joined(separator: "\n")))
+                    } else if let toolName {
+                        // A natural model mistake: naming the service as the
+                        // kind itself (```eaon:github tool="x") instead of
+                        // ```eaon:mcp server="github". The intent is
+                        // unambiguous when a tool attribute is present, so
+                        // accept it — a wrong guess still dies with a clear
+                        // "unknown service" error fed back to the model,
+                        // instead of the whole call being silently dropped.
                         events.append(.mcpCall(server: serverName ?? kind, tool: toolName, argumentsJSON: bodyLines.joined(separator: "\n")))
                     }
                 }
@@ -244,6 +309,11 @@ enum WorkspaceParser {
                 // aqua:-prefixed blocks. Both prefixes are 5 characters.
                 if let language = info.language, language.hasPrefix("eaon:") || language.hasPrefix("aqua:") {
                     mode = .tool(kind: String(language.dropFirst(5)), path: info.path, toolName: info.tool, serverName: info.server)
+                    bodyLines = []
+                } else if let language = info.language, let kind = prefixlessToolKind(language) {
+                    // The eaon: prefix was dropped but the kind is still
+                    // unambiguous — treat it exactly like the prefixed form.
+                    mode = .tool(kind: kind, path: info.path, toolName: info.tool, serverName: info.server)
                     bodyLines = []
                 } else if let path = info.path {
                     mode = .file(path: path, language: info.language)

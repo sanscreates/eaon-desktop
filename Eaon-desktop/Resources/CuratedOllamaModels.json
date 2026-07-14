@@ -9,6 +9,7 @@
     "DeepSeek",
     "Cohere",
     "IBM Granite",
+    "Liquid AI",
     "Vision (can see images)",
     "Coding",
     "Small & Fast",
@@ -391,6 +392,69 @@
       "category": "Qwen"
     },
     {
+      "name": "qwen3.5:0.8b",
+      "blurb": "About as small as Qwen 3.5 gets",
+      "approxSize": "≈1.0 GB",
+      "sizeBytes": 1036046583,
+      "brand": "qwen",
+      "category": "Qwen",
+      "isNew": true
+    },
+    {
+      "name": "qwen3.5:2b",
+      "blurb": "Small and fast Qwen 3.5",
+      "approxSize": "≈2.7 GB",
+      "sizeBytes": 2741192820,
+      "brand": "qwen",
+      "category": "Qwen",
+      "isNew": true
+    },
+    {
+      "name": "qwen3.5:4b",
+      "blurb": "A step up from the smallest Qwen 3.5",
+      "approxSize": "≈3.4 GB",
+      "sizeBytes": 3389983735,
+      "brand": "qwen",
+      "category": "Qwen",
+      "isNew": true
+    },
+    {
+      "name": "qwen3.5:9b",
+      "blurb": "Mid-size Qwen 3.5 — Alibaba's default pick for this generation",
+      "approxSize": "≈6.6 GB",
+      "sizeBytes": 6594474711,
+      "brand": "qwen",
+      "category": "Qwen",
+      "isNew": true
+    },
+    {
+      "name": "qwen3.5:27b",
+      "blurb": "Bigger Qwen 3.5 for tougher tasks",
+      "approxSize": "≈17 GB",
+      "sizeBytes": 17420432728,
+      "brand": "qwen",
+      "category": "Qwen",
+      "isNew": true
+    },
+    {
+      "name": "qwen3.5:35b",
+      "blurb": "Large Qwen 3.5",
+      "approxSize": "≈24 GB",
+      "sizeBytes": 23869191742,
+      "brand": "qwen",
+      "category": "Qwen",
+      "isNew": true
+    },
+    {
+      "name": "qwen3.5:122b",
+      "blurb": "The biggest locally-runnable Qwen 3.5 — needs serious hardware",
+      "approxSize": "≈81 GB",
+      "sizeBytes": 81370036360,
+      "brand": "qwen",
+      "category": "Qwen",
+      "isNew": true
+    },
+    {
       "name": "gemma3",
       "blurb": "Google's open Gemma, previous generation",
       "approxSize": "≈3.3 GB",
@@ -427,6 +491,33 @@
       "blurb": "The large Gemma 4",
       "approxSize": "≈18 GB",
       "sizeBytes": 17987581215,
+      "brand": "google",
+      "category": "Google Gemma",
+      "isNew": true
+    },
+    {
+      "name": "gemma4:e2b",
+      "blurb": "Google's smallest Gemma 4, built for phones",
+      "approxSize": "≈7.2 GB",
+      "sizeBytes": 7162405886,
+      "brand": "google",
+      "category": "Google Gemma",
+      "isNew": true
+    },
+    {
+      "name": "gemma4:12b",
+      "blurb": "Gemma 4's unified multimodal model — vision and audio built in",
+      "approxSize": "≈7.6 GB",
+      "sizeBytes": 7556508396,
+      "brand": "google",
+      "category": "Google Gemma",
+      "isNew": true
+    },
+    {
+      "name": "gemma4:31b",
+      "blurb": "The largest Gemma 4, for workstations",
+      "approxSize": "≈20 GB",
+      "sizeBytes": 19868981791,
       "brand": "google",
       "category": "Google Gemma",
       "isNew": true
@@ -926,6 +1017,33 @@
       "category": "IBM Granite"
     },
     {
+      "name": "granite4.1:3b",
+      "blurb": "IBM's newest Granite, smallest size — long context, tuned for tool use",
+      "approxSize": "≈2.1 GB",
+      "sizeBytes": 2099520281,
+      "brand": "ibm",
+      "category": "IBM Granite",
+      "isNew": true
+    },
+    {
+      "name": "granite4.1:8b",
+      "blurb": "IBM's newest Granite, mid-size",
+      "approxSize": "≈5.3 GB",
+      "sizeBytes": 5347933017,
+      "brand": "ibm",
+      "category": "IBM Granite",
+      "isNew": true
+    },
+    {
+      "name": "granite4.1:30b",
+      "blurb": "IBM's newest Granite, largest size",
+      "approxSize": "≈17 GB",
+      "sizeBytes": 17490259354,
+      "brand": "ibm",
+      "category": "IBM Granite",
+      "isNew": true
+    },
+    {
       "name": "smollm2",
       "blurb": "The standard SmolLM2 size — also in Popular above",
       "approxSize": "≈1.8 GB",
@@ -1157,6 +1275,24 @@
       "sizeBytes": 74192938710,
       "brand": "databricks",
       "category": "More Open Models"
+    },
+    {
+      "name": "lfm2.5",
+      "blurb": "Liquid AI's on-device model, built for fast, memory-efficient agents",
+      "approxSize": "≈5.2 GB",
+      "sizeBytes": 5156075525,
+      "brand": "liquidAI",
+      "category": "Liquid AI",
+      "isNew": true
+    },
+    {
+      "name": "lfm2.5-thinking",
+      "blurb": "A reasoning-tuned Liquid AI model — shows its thinking steps",
+      "approxSize": "≈731 MB",
+      "sizeBytes": 731163903,
+      "brand": "liquidAI",
+      "category": "Liquid AI",
+      "isNew": true
     }
   ]
 }
