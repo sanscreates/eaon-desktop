@@ -25,6 +25,18 @@ all from the same app, with no account required for the local-only path.
 - **Memory** — Eaon can learn durable facts about you across conversations,
   entirely on-device.
 
+## Quick start
+
+Clone the repository, then run the development launcher:
+
+```sh
+git clone https://github.com/sanscreates/eaon-desktop.git
+cd eaon-desktop
+./run.sh
+```
+
+The launcher builds Eaon and starts it as a detached macOS app process.
+
 ## Building
 
 Requires Xcode 15+ / Swift 5.9+ and macOS 14+.
