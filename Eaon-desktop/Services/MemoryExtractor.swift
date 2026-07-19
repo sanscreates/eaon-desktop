@@ -323,7 +323,7 @@ enum MemoryExtractor {
     ) async throws {
         // Trial-aware: a free-week credential routes to Eaon's gateway and
         // signs the exact body bytes; a user key hits the Aqua API as ever.
-        var request = URLRequest(url: AquaAccess.baseURL(forKey: apiKey).appendingPathComponent("chat/completions"))
+        var request = URLRequest(url: EaonAccess.baseURL(forKey: apiKey).appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -331,7 +331,7 @@ enum MemoryExtractor {
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": modelId, "messages": apiMessages, "stream": true,
         ])
-        AquaAccess.authorize(&request, apiKey: apiKey)
+        EaonAccess.authorize(&request, apiKey: apiKey)
 
         let (bytes, response) = try await AppHTTP.session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {

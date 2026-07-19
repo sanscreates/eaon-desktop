@@ -257,8 +257,8 @@ final class QuickAssistantViewModel {
 
         // User key or free-week trial — the trial's base URL and signing
         // ride the same BYOK streaming path (see CustomProviderAPIService's
-        // AquaAccess.authorize call).
-        guard let access = AquaAccess.current else {
+        // EaonAccess.authorize call).
+        guard let access = EaonAccess.current else {
             throw QuickAssistantError(message: "Add an API key (or start your free week) or a local model in the main Eaon window first.")
         }
         let config = CustomProviderConfig(

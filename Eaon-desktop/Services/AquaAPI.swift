@@ -19,9 +19,9 @@ struct AquaAPIService {
         // trial plan can actually run. With a user key (or no access at
         // all), the public Aqua list is fetched exactly as before.
         var request: URLRequest
-        if let access = AquaAccess.current, access.isTrial {
+        if let access = EaonAccess.current, access.isTrial {
             request = URLRequest(url: access.modelsURL)
-            AquaAccess.authorize(&request, apiKey: access.apiKey)
+            EaonAccess.authorize(&request, apiKey: access.apiKey)
         } else {
             request = URLRequest(url: AquaAPI.modelsURL)
         }

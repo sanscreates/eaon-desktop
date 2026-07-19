@@ -80,7 +80,7 @@ struct CustomProviderAPIService {
         // through this path (Quick Assistant routes the hosted models here)
         // signs the exact request bytes; ordinary BYOK keys get the same
         // plain bearer header as before.
-        AquaAccess.authorize(&request, apiKey: apiKey)
+        EaonAccess.authorize(&request, apiKey: apiKey)
 
         let (bytes, http) = try await TransientHTTPRetry.send(request)
         if http.statusCode != 200 {

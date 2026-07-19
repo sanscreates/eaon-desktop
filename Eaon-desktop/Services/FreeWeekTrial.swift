@@ -279,14 +279,14 @@ final class TrialStore {
     }
 }
 
-// MARK: - Aqua access resolution
+// MARK: - Eaon access resolution
 
 /// The one choke point deciding how hosted-model requests authenticate:
 /// the user's own key against the Aqua API when they have one, else the
 /// free-week credential against Eaon's gateway. Every hosted call site
 /// resolves through here so key-vs-trial can never disagree between the
 /// URL a request goes to and the credential attached to it.
-struct AquaAccess {
+struct EaonAccess {
     let baseURL: URL
     let apiKey: String
     let isTrial: Bool
@@ -297,12 +297,12 @@ struct AquaAccess {
     /// A user-entered key always wins — the trial is the no-key on-ramp,
     /// not a competitor to the user's own account. Nonisolated (reads the
     /// lock-box, not MainActor state) so streaming paths resolve freely.
-    static var current: AquaAccess? {
+    static var current: EaonAccess? {
         if let key = APIKeyStore.loadAPIKey(), !key.isEmpty {
-            return AquaAccess(baseURL: AquaAPI.baseURL, apiKey: key, isTrial: false)
+            return EaonAccess(baseURL: AquaAPI.baseURL, apiKey: key, isTrial: false)
         }
         if let credential = TrialCredentialBox.current, credential.expiresAt > Date() {
-            return AquaAccess(baseURL: FreeWeekTrial.baseURL, apiKey: credential.key, isTrial: true)
+            return EaonAccess(baseURL: FreeWeekTrial.baseURL, apiKey: credential.key, isTrial: true)
         }
         return nil
     }

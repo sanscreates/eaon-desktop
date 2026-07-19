@@ -9,7 +9,7 @@ struct ModelCompareView: View {
     @State private var showingSystemPrompt = false
 
     // User key or an active free-week trial — either powers Compare.
-    private var apiKey: String? { AquaAccess.current?.apiKey }
+    private var apiKey: String? { EaonAccess.current?.apiKey }
 
     var body: some View {
         VStack(spacing: 0) {

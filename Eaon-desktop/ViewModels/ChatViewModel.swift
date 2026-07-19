@@ -1710,8 +1710,8 @@ class ChatViewModel {
             return GenerationRouting(customConfig: nil, localRecord: localRecord, apiKey: "local-no-key")
         } else {
             // User key first, else an active free-week trial (which routes
-            // to Eaon's own gateway) — see AquaAccess.
-            guard let access = AquaAccess.current else {
+            // to Eaon's own gateway) — see EaonAccess.
+            guard let access = EaonAccess.current else {
                 appendSystemError(
                     TrialStore.shared.isExpired
                         ? "Your free week has ended. Add your Eaon API key in Settings → Eaon API to keep chatting."
@@ -1799,7 +1799,7 @@ class ChatViewModel {
         let localRecord = customConfig == nil ? LocalAIManager.shared.record(withId: selectedModel) : nil
         var aquaApiKey: String?
         if customConfig == nil, localRecord == nil {
-            guard let access = AquaAccess.current else {
+            guard let access = EaonAccess.current else {
                 memoryBackfillStatus = "Add your Eaon API key (or start your free week) first, or switch to a model that already has one."
                 return
             }
@@ -1860,7 +1860,7 @@ class ChatViewModel {
                 return
             }
         } else if localRecord == nil {
-            guard let access = AquaAccess.current else {
+            guard let access = EaonAccess.current else {
                 memoryBackfillStatus = "Add your Eaon API key (or start your free week) first, or switch to a model that already has one."
                 return
             }
@@ -2966,7 +2966,7 @@ class ChatViewModel {
         // Free-week trials route to Eaon's own gateway; a user key goes to
         // the Aqua API as always. Authorization is attached AFTER the body
         // below — trial signatures cover the exact request bytes.
-        var request = URLRequest(url: AquaAccess.baseURL(forKey: apiKey).appendingPathComponent("chat/completions"))
+        var request = URLRequest(url: EaonAccess.baseURL(forKey: apiKey).appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -2988,7 +2988,7 @@ class ChatViewModel {
         }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        AquaAccess.authorize(&request, apiKey: apiKey)
+        EaonAccess.authorize(&request, apiKey: apiKey)
 
         let (bytes, httpResponse) = try await TransientHTTPRetry.send(request)
 

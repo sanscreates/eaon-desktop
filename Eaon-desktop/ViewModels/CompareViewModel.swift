@@ -93,8 +93,8 @@ final class CompareViewModel {
         slot.isGenerating = true
         slot.generationStart = Date()
 
-        // Trial-aware routing + body-bound authorization (see AquaAccess).
-        var request = URLRequest(url: AquaAccess.baseURL(forKey: apiKey).appendingPathComponent("chat/completions"))
+        // Trial-aware routing + body-bound authorization (see EaonAccess).
+        var request = URLRequest(url: EaonAccess.baseURL(forKey: apiKey).appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -118,7 +118,7 @@ final class CompareViewModel {
 
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            AquaAccess.authorize(&request, apiKey: apiKey)
+            EaonAccess.authorize(&request, apiKey: apiKey)
             let (bytes, response) = try await AppHTTP.session.bytes(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse,
