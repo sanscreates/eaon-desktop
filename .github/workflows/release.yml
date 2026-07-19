@@ -108,7 +108,7 @@ jobs:
           releaseBody: |
             Cross-platform builds of Eaon.
 
-            - **Windows:** download the **`.exe`** installer (the `.msi` is an alternative).
+            - **Windows:** download the **`.exe`** installer.
             - **Linux:** download the **`.AppImage`** (portable, runs anywhere) or the **`.deb`** (Debian/Ubuntu).
 
             **Heads up — these builds are not code-signed yet.** On Windows,
@@ -132,7 +132,6 @@ jobs:
           name: eaon-${{ matrix.label }}-installers
           path: |
             eaon-tauri/src-tauri/target/release/bundle/nsis/*.exe
-            eaon-tauri/src-tauri/target/release/bundle/msi/*.msi
             eaon-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
             eaon-tauri/src-tauri/target/release/bundle/deb/*.deb
           if-no-files-found: warn
