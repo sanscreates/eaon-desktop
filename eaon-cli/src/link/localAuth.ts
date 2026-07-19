@@ -19,8 +19,25 @@ const KNOWN_FORMATS: readonly CustomProviderFormat[] = ["openAICompatible", "ant
 
 /** Debug and distributed builds use different UserDefaults domains (see
  * UserDefaults domain split in the Mac app's own docs) — dist checked
- * first since that's what a real end user is running. */
+ * first since that's what a real end user is running, and its Aqua key
+ * wins if both domains somehow have one. BOTH are scanned and merged
+ * (see discoverDesktopCredentials) — a real user can easily have run both
+ * builds at different times with different custom providers saved under
+ * each, and only checking the first domain that has ANYTHING silently
+ * hides the other one's data entirely, exactly the "only Aqua shows up"
+ * bug this was written to fix. */
 const DESKTOP_DOMAINS = ["dev.eaon.desktop", "Eaon-desktop"];
+const DOMAIN_LABEL: Record<string, string> = { "dev.eaon.desktop": "release build", "Eaon-desktop": "debug build" };
+
+/** A single `defaults export <domain> -` on a real machine has been
+ * observed at 4-9MB (Eaon Desktop caches plenty else in UserDefaults
+ * beyond the one key this actually wants) — Node's execFileSync defaults
+ * to a 1MB output buffer and throws ENOBUFS past that, silently caught by
+ * the try/catch below and mistaken for "no custom providers saved". This
+ * is the actual, confirmed (not guessed) root cause of that bug — real
+ * data, real repro, real fix, not a hypothesis. Generous headroom above
+ * observed sizes rather than just clearing the current bar. */
+const MAX_DEFAULTS_EXPORT_BYTES = 200 * 1024 * 1024;
 
 const AQUA_KEY_DEFAULTS_KEY = "api_key_eaon-api-key";
 const CUSTOM_PROVIDERS_DEFAULTS_KEY = "aqua_custom_providers";
@@ -41,6 +58,12 @@ export interface DiscoveredCustomProvider {
   modelIDs: string[];
   apiKey: string | null;
   format: CustomProviderFormat;
+  /** Which UserDefaults domain this was actually read from — a real user
+   * can have the same-named connection saved separately under both the
+   * debug and release builds (different ids, so both surface as distinct
+   * entries); the browser page uses this to tell them apart when their
+   * display names collide, instead of showing two identical-looking rows. */
+  sourceDomain: string;
 }
 
 export interface DiscoveryResult {
@@ -70,8 +93,13 @@ function defaultsReadString(domain: string, key: string): string | null {
 
 function defaultsReadDataAsJSON<T>(domain: string, key: string): T | null {
   try {
-    const exported = execFileSync("defaults", ["export", domain, "-"], { stdio: ["ignore", "pipe", "ignore"] });
-    const b64 = execFileSync("plutil", ["-extract", key, "raw", "-o", "-", "-"], { input: exported, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] }).trim();
+    const exported = execFileSync("defaults", ["export", domain, "-"], { stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAX_DEFAULTS_EXPORT_BYTES });
+    const b64 = execFileSync("plutil", ["-extract", key, "raw", "-o", "-", "-"], {
+      input: exported,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+      maxBuffer: MAX_DEFAULTS_EXPORT_BYTES,
+    }).trim();
     if (!b64) return null;
     const json = Buffer.from(b64, "base64").toString("utf8");
     return JSON.parse(json) as T;
@@ -93,27 +121,54 @@ export function isLocalDiscoveryAvailable(): boolean {
   return isMac;
 }
 
+/** Human label for a raw UserDefaults domain — used to disambiguate two
+ * discovered providers that happen to share a display name but came from
+ * different Eaon Desktop builds (see DiscoveredCustomProvider.sourceDomain). */
+export function domainLabel(domain: string): string {
+  return DOMAIN_LABEL[domain] ?? domain;
+}
+
 /** Discovers Eaon Desktop's saved Aqua key and BYOK providers on this same
- * Mac. Returns empty results (not an error) when nothing is found — that's
- * a legitimate outcome the caller shows plainly rather than a failure. */
+ * Mac — scans and MERGES every domain that has data, rather than stopping
+ * at the first one, so running both the debug and release builds at
+ * different times (a completely normal thing to do during development)
+ * doesn't silently hide whichever one wasn't checked first. Returns empty
+ * results (not an error) when nothing is found anywhere — that's a
+ * legitimate outcome the caller shows plainly rather than a failure. */
 export function discoverDesktopCredentials(): DiscoveryResult {
   if (!isMac) {
     return { domain: null, aquaApiKey: null, customProviders: [], skippedUnrecognizedFormat: 0 };
   }
 
+  let aquaApiKey: string | null = null;
+  const customProviders: DiscoveredCustomProvider[] = [];
+  const seenProviderIds = new Set<string>();
+  const contributingDomains: string[] = [];
+  let skipped = 0;
+
   for (const domain of DESKTOP_DOMAINS) {
     if (!hasAnyDomainData(domain)) continue;
 
-    const aquaApiKey = defaultsReadString(domain, AQUA_KEY_DEFAULTS_KEY);
+    const domainAquaKey = defaultsReadString(domain, AQUA_KEY_DEFAULTS_KEY);
     const rawConfigs = defaultsReadDataAsJSON<RawCustomProviderConfig[]>(domain, CUSTOM_PROVIDERS_DEFAULTS_KEY) ?? [];
 
-    let skipped = 0;
-    const customProviders: DiscoveredCustomProvider[] = [];
+    let contributed = false;
+    if (domainAquaKey && !aquaApiKey) {
+      aquaApiKey = domainAquaKey;
+      contributed = true;
+    }
+
     for (const raw of rawConfigs) {
       if (!(KNOWN_FORMATS as readonly string[]).includes(raw.format)) {
         skipped++;
+        contributed = true;
         continue;
       }
+      // The exact same connection can genuinely exist under both domains
+      // (id is its real identity) — first domain that has it wins that
+      // entry rather than listing it twice.
+      if (seenProviderIds.has(raw.id)) continue;
+      seenProviderIds.add(raw.id);
       const apiKey = defaultsReadString(domain, `api_key_custom-provider-${raw.id}`);
       const displayName = (raw.customName && raw.customName.trim().length > 0) ? raw.customName.trim() : (raw.brand ?? "Custom provider");
       customProviders.push({
@@ -123,17 +178,23 @@ export function discoverDesktopCredentials(): DiscoveryResult {
         modelIDs: Array.isArray(raw.modelIDs) ? raw.modelIDs.filter((m) => typeof m === "string" && m.trim().length > 0) : [],
         apiKey,
         format: raw.format as CustomProviderFormat,
+        sourceDomain: domain,
       });
+      contributed = true;
     }
 
-    if (aquaApiKey || customProviders.length > 0 || skipped > 0) {
-      return { domain, aquaApiKey, customProviders, skippedUnrecognizedFormat: skipped };
-    }
-    // This domain existed but had neither credential — keep checking the
-    // other domain rather than reporting "found the domain, found nothing."
+    if (contributed) contributingDomains.push(domain);
   }
 
-  return { domain: null, aquaApiKey: null, customProviders: [], skippedUnrecognizedFormat: 0 };
+  if (!aquaApiKey && customProviders.length === 0 && skipped === 0) {
+    return { domain: null, aquaApiKey: null, customProviders: [], skippedUnrecognizedFormat: 0 };
+  }
+  return {
+    domain: contributingDomains.map((d) => DOMAIN_LABEL[d] ?? d).join(" + "),
+    aquaApiKey,
+    customProviders,
+    skippedUnrecognizedFormat: skipped,
+  };
 }
 
 /** What the user actually picked on the browser confirmation page — /link

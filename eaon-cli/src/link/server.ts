@@ -5,6 +5,7 @@
 // closing the tab or letting it time out changes nothing.
 
 import http from "node:http";
+import { domainLabel } from "./localAuth.js";
 import type { DiscoveryResult } from "./localAuth.js";
 
 export interface LinkFlowResult {
@@ -33,7 +34,16 @@ function pickableRows(discovery: DiscoveryResult): PickableRow[] {
       ? { checkName: "aqua", label: "Aqua API key" }
       : { checkName: null, label: "No Aqua API key found" },
   ];
-  for (const p of discovery.customProviders) rows.push({ checkName: `provider_${p.id}`, label: `Custom provider — ${p.displayName}` });
+  // Merging both the debug and release build's saved providers (see
+  // discoverDesktopCredentials) means two DIFFERENT connections can
+  // legitimately share a display name — disambiguate only those, so the
+  // common single-build case stays uncluttered.
+  const nameCounts = new Map<string, number>();
+  for (const p of discovery.customProviders) nameCounts.set(p.displayName, (nameCounts.get(p.displayName) ?? 0) + 1);
+  for (const p of discovery.customProviders) {
+    const suffix = (nameCounts.get(p.displayName) ?? 0) > 1 ? ` (${domainLabel(p.sourceDomain)})` : "";
+    rows.push({ checkName: `provider_${p.id}`, label: `Custom provider — ${p.displayName}${suffix}` });
+  }
   if (discovery.skippedUnrecognizedFormat > 0) {
     rows.push({ checkName: null, label: `${discovery.skippedUnrecognizedFormat} provider${discovery.skippedUnrecognizedFormat === 1 ? "" : "s"} skipped (unrecognized format)` });
   }

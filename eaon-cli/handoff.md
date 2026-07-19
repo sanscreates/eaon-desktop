@@ -35,6 +35,7 @@ npm run typecheck    # tsc --noEmit — do this after every change, it's fast
 npm run build         # tsc -p tsconfig.json — emits to dist/
 node dist/cli.js      # run it interactively
 node dist/cli.js -p "some prompt" -m agent --auto   # non-interactive, scriptable
+node dist/cli.js --welcome   # preview the first-run wordmark/log-in screen even if already configured
 ```
 
 There's no `npm link`'d global `eaon` guaranteed to exist — always run via
@@ -128,7 +129,220 @@ is wired there (`handleCommand`), not just declared in `commands/index.ts`.
 
 ## This cycle's work (most recent → oldest)
 
-1. **Agent-loop hardening + speed pass** (prompt: "make it work like Claude
+1. **Fixed `/link` only ever showing the Aqua provider** (user report: "the
+   only provider that is showing up is the aqua provider... pull all of the
+   data"). Two real, confirmed bugs, found by directly inspecting this
+   machine's actual UserDefaults data rather than guessing:
+   - **The actual root cause**: `defaultsReadDataAsJSON` (`link/
+     localAuth.ts`) does `defaults export <domain> -` to get the full
+     domain as a plist, then `plutil -extract` just the one key it
+     wants — but a real `defaults export dev.eaon.desktop -` on this
+     machine is **8.8MB** (Eaon Desktop caches plenty else in UserDefaults
+     beyond the one key this cares about), and Node's `execFileSync`
+     defaults to a 1MB output buffer. Reproduced directly:
+     `execFileSync('defaults', ['export', 'dev.eaon.desktop', '-'], ...)`
+     throws `ENOBUFS` — caught by the function's blanket `try/catch` and
+     silently returned as `null`, which `discoverDesktopCredentials`
+     treats as "no custom providers saved" even though 3 real ones were
+     sitting right there. Confirmed `defaults read domain key` can't be
+     used as a workaround either — it truncates large DATA values in its
+     display (verified: an 86-byte truncated dump for what should be 2536
+     bytes). Fix: explicit generous `maxBuffer` (200MB, real observed
+     sizes are 4-9MB) on both `execFileSync` calls in that function — kept
+     the existing stdin/stdout-only approach (no temp file), which is a
+     deliberate documented security property of this file (secrets never
+     touch disk, even briefly) that a temp-file workaround would have
+     broken.
+   - **The second bug**: `discoverDesktopCredentials` returned as soon as
+     the FIRST UserDefaults domain (`dev.eaon.desktop`, the release build)
+     had ANY data at all, never even checking the second (`Eaon-desktop`,
+     the debug build) — so a user who's run both builds at different times
+     (completely normal during development) only ever gets whichever
+     build's data happened to be checked first. Confirmed this is real for
+     THIS user specifically: both domains have genuinely different custom
+     providers saved (one shared connection, two pairs that are separately-
+     added, different-`id` connections to similar-looking endpoints).
+     Rewrote to scan and MERGE both domains (dedup by real `id`, dist's Aqua
+     key wins if both somehow have one) instead of stopping at the first
+     match — this is the literal "pull all of the data" fix.
+   - **Follow-on polish, motivated by real data**: merging both domains
+     means two distinct connections can share a display name (this user
+     has two separately-added "Aquadevs" providers, one per build) — added
+     `sourceDomain` to `DiscoveredCustomProvider` and a `domainLabel()`
+     helper (`"dev.eaon.desktop"` → "release build", `"Eaon-desktop"` →
+     "debug build"), used to disambiguate ONLY colliding names (both on
+     the picker page and in `/link`'s closing summary message) so the
+     common single-build case stays uncluttered.
+   - **Verified against this machine's REAL UserDefaults data end-to-end**,
+     not synthetic mocks: the actual fixed `discoverDesktopCredentials()`
+     now returns the Aqua key plus all 5 real custom providers across both
+     domains (previously: Aqua key only); rendered the actual `/link`
+     browser page (via a real local server, `fetch()`ed directly — never
+     called `open()`, so no real browser was launched — then immediately
+     POSTed `/cancel` to clean up) and confirmed all 5 provider checkboxes
+     appear with the two "Aquadevs" entries correctly disambiguated as
+     "(release build)"/"(debug build)". Also grepped the whole codebase
+     for other unguarded `execFileSync` calls that could hit the same
+     buffer-limit bug class — confirmed the two fixed here were the only
+     ones actually at risk (the other two calls in this same file read a
+     single small key, or discard stdout entirely, so `maxBuffer` was
+     never actually a concern there). Typecheck/build clean.
+
+2. **Real Eaon app-icon rendered as terminal block art, added to
+   WelcomeScreen** (prompt: "add the eaon logo [the actual icon image] into
+   that same format"). Sits above the wordmark as an icon+logotype lockup.
+   - **`ui/iconArt.ts`**: generated from the REAL icon file (the user
+     shared it — `Eaon.jpg`, 1024x1024) via a small Python/Pillow pipeline,
+     not hand-drawn or guessed. Measured the real colors directly from the
+     image first (`img.getpixel(...)` at known interior points) rather
+     than assuming: background is pure `#000000` (so treating near-black
+     as transparent blends seamlessly with a terminal's own black bg),
+     the field color is `#F68A66` — note this is close to but NOT the same
+     as `theme.accent` (`#F17455`) used everywhere else in the CLI; used
+     the real measured value for fidelity to the actual logo rather than
+     silently forcing it to match the theme, worth knowing if that
+     divergence ever needs reconciling — and the mark is pure `#FFFFFF`.
+     Downsampled to 44x44 with `Image.BOX` (true area-average — compared
+     against `LANCZOS` at the same sizes and they agreed almost exactly,
+     so no ringing-artifact risk either way) after first checking 36x36
+     lost the triangle mark almost entirely (thin features vanish
+     disproportionately at low res) and 48-60x confirmed clearly readable;
+     44x44 was the compact/legible balance. Colors are the true
+     area-averaged RGB per pixel (NOT palette-snapped to 3 flat colors) so
+     edges anti-alias smoothly instead of looking like hard pixel-art —
+     only 41 unique colors resulted in practice since it's a flat 2-tone
+     source. Deduped into a palette + index grid, `-1` = transparent.
+   - **Rendering** (`IconArt` in `WelcomeScreen.tsx`): classic half-block
+     technique — 2 source pixel-rows packed into 1 terminal row via `▀`
+     (its own foreground paints the cell's top half, background paints the
+     bottom half), giving a roughly-square 44x22 render instead of a
+     vertically-squashed one. `▄`/plain-`▀`/space fallbacks for
+     partially- or fully-transparent cells. Built once via `useMemo` — as
+     a WelcomeScreen sibling of the pulsing prompt/spinner, it doesn't
+     re-render on their ticks anyway (React re-renders don't propagate
+     sideways to siblings), but memoized to be explicit about it.
+   - **New responsive gate**: the icon needs real vertical room (~40 rows
+     for icon+wordmark+chrome together) that the existing width-only
+     `fitsFullArt` check didn't cover — added a `stdout.rows`-based check,
+     defaulting to SHOWING the icon when height is unknown rather than
+     assuming too little.
+   - **Verified with real measured colors, not just structure** — and this
+     surfaced a genuine gap in every headless-Ink test this project has
+     run so far, worth remembering for next time: Ink's colorize.js
+     imports a single GLOBAL `chalk` instance, which detects color support
+     from the REAL `process.stdout` (this sandboxed shell's, which isn't a
+     TTY — `process.stdout.isTTY` is `undefined` here), not from whatever
+     fake stdout stream gets passed into Ink's own `render()` options. So
+     every earlier headless test this session technically only verified
+     TEXT content (via stripAnsi), never actual color application — those
+     checks are still valid as behavior/content tests, they just never
+     happened to claim color correctness specifically. Caught this by
+     writing an assertion that specifically expected real hex-derived
+     truecolor codes (246;138;102 for the measured orange, etc.) and
+     watching it fail; root-caused via chalk's own source rather than
+     assuming the harness was fine or the code was broken; confirmed the
+     fix with `FORCE_COLOR=3` (the standard override for exactly this
+     class of problem), which made the real measured RGB values — orange,
+     white, and even the anti-aliased edge blends — appear as correct
+     `38;2;R;G;Bm`/`48;2;R;G;Bm` truecolor sequences. Final suite: 9/9,
+     covering the half-block render, both real measured colors present as
+     truecolor, coexistence with the wordmark, the new height fallback
+     (both a too-short terminal and an unknown-height terminal), and the
+     pre-existing width fallback still intact. Typecheck/build clean; temp
+     scripts deleted after use.
+   - **Also noticed, unrelated to this change**: the real
+     `~/.eaon/cli/config.json` legitimately changed during this session
+     (new mtime, real `aquaApiKey`/`selectedModelKey` content) — audited
+     every test script run this cycle and confirmed none of them could
+     have written it (isolated temp `$HOME`, or a fully mocked `onLogin`
+     with no real save path); this reads as the user's own normal use of
+     the CLI between messages, not a side effect of anything here, but
+     flagging per this project's own "never silently assume, disclose
+     what you notice" standard.
+   - **Not verified**: actual visual/color judgment in a real terminal, same
+     caveat as the wordmark itself — worth a `--welcome` look.
+
+3. **First-run welcome/log-in screen + real ASCII wordmark** (prompt: "make
+   the CLI look cool, show the EAON logo like [reference image] on first
+   install, press-any-key opens the browser to import providers from Eaon
+   Desktop"). New, not a tweak to the existing in-app banner (EaonBanner.tsx,
+   untouched) — that one's a dense returning-user card; this is a rare,
+   once-per-install moment, so it's deliberately spacious/theatrical instead
+   (see the frontend-design skill's guidance this was built against).
+   - **`ui/logoArt.ts`**: the EAON wordmark, generated via `figlet -f
+     univers.flf EAON` (installed via `brew install figlet` — local,
+     reversible, one-time generation aid; not a runtime dependency, the
+     output is baked in as a static string array so end users never need
+     figlet). Chosen after comparing ~15 candidate fonts against the
+     reference image — `univers` was the closest real match to its 3D-
+     shaded block vocabulary (`db`, `Y8,`/`,8P`, `8b`/`dP`), confirmed by
+     printing both side by side, not eyeballed from memory. Regeneration
+     command is in the file's own doc comment.
+   - **`ui/WelcomeScreen.tsx`**: centered wordmark (accent color) + version
+     line (muted) + a slow-pulsing green "Press any key to log in…"
+     (mirrors the reference exactly; falls back to "…to continue" on non-
+     macOS, where /link has nothing to connect to). Any key (not Ctrl+C,
+     which is left to the app-level double-press exit) triggers the REAL
+     `handleLink` — reused as-is, not reimplemented, so there's exactly one
+     "what /link does". Shows a spinner while waiting on the browser, Esc
+     skips the wait (the link attempt keeps running in the background —
+     safe, since handleLink already can't crash the process per last
+     cycle's hardening), and a brief closing line ("✓ Connected — …",
+     "No Eaon Desktop found — continuing…", etc.) before auto-advancing.
+     Narrow terminals (<58 cols) fall back to plain "EAON" text instead of
+     an overflowing 54-col block. `cli.tsx`/`config.ts`/`platform.ts`
+     untouched beyond a new `--welcome` debug flag (see below).
+   - **`handleLink` now returns a `LinkOutcome` tag** (was `void`) — every
+     branch (`linked`/`nothing_selected`/`nothing_found`/`cancelled`/
+     `timed_out`/`no_platform_support`/`error`) instead of a bare early
+     `return`, so WelcomeScreen can show a real closing message instead of
+     jumping silently. `/link`'s own command handler still just awaits it
+     and ignores the value — fully backward compatible.
+   - **First-run gate**: `!fs.existsSync(configFile())` in `App.tsx` — no
+     config file on disk yet IS "first install". Whatever ends the welcome
+     screen (linked or not) calls `saveConfig(config)` so a config file
+     always exists afterward and the screen can never show a second time,
+     even down paths that don't already save one themselves.
+   - **`--welcome` CLI flag**: force-shows the screen even with an existing
+     config — added because the user's OWN config file already existed
+     from earlier sessions' testing, so the natural gate wouldn't have let
+     them see this without it.
+   - **Verified far more thoroughly than prior UI work in this project**:
+     rather than falling back on the documented pty-is-unreliable-here
+     excuse, built a real headless Ink test harness — a fake `stdin`
+     (Node `Readable` with `isTTY`/`setRawMode`/`ref`/`unref` stubbed, which
+     is ALL Ink's `App.js` actually reads) and fake `stdout` (captures
+     writes, strips ANSI) passed straight to Ink's real `render()`. This
+     sidesteps the pty layer entirely — no real tty, so none of the
+     keystroke-timing races that made `expect`-based testing unreliable
+     apply. Drove the REAL `WelcomeScreen` and the REAL `App` (not mocks)
+     through: renders wordmark/version/prompt copy, does NOT call
+     onLogin/onFinish before a keypress, a keypress calls the real
+     `handleLink` and shows the connecting spinner, Esc-while-connecting
+     skips immediately, Ctrl+C is correctly ignored by this screen, non-mac
+     copy switches correctly with no caption, narrow terminal falls back to
+     plain text, the full happy path (key → connecting → "Connected" →
+     auto-finish after ~1.2s) — 19/19 checks, plus a separate 6/6 App-level
+     integration pass confirming fresh-install shows the screen,
+     already-configured skips straight to the normal composer, and
+     `--welcome` forces it. One flake surfaced and was root-caused (not
+     hand-waved): 5 `setImmediate` ticks weren't enough for Ink's real
+     render scheduler to flush to the fake stdout; adding a genuine ~80ms
+     wait fixed it — a real, explained timing fact, not a shrug. Deliberately
+     never simulated a keypress against the real `App` (only against
+     WelcomeScreen with a mocked `onLogin`) — on this dev Mac that would
+     invoke the REAL `discoverDesktopCredentials`/`runLinkServer`/`open`,
+     popping an actual browser tab as a side effect of an unattended test,
+     which isn't acceptable regardless of how safe the underlying feature
+     is. Also confirmed via file mtime that the real
+     `~/.eaon/cli/config.json` was never touched by any of this (every test
+     used a temp `$HOME`). Typecheck/build clean; temp test scripts deleted
+     after use, nothing left in the repo.
+   - **Not verified**: actual visual/color judgment in a real terminal —
+     the harness proves correctness of state/logic/content, not "does it
+     look good to a human eye." Worth an actual look with `--welcome`.
+
+4. **Agent-loop hardening + speed pass** (prompt: "make it work like Claude
    Code, make agentic coding better and faster"). This cycle went after the
    loop itself, driven by failures actually observed in the previous
    cycle's live runs (a model calling tool "write" and burning a corrective
@@ -184,7 +398,7 @@ is wired there (`handleCommand`), not just declared in `commands/index.ts`.
      run. Typecheck/build clean. UI bits (status line, deny-row fix) still
      need an interactive eyeball per the pty caveat below.
 
-2. **Big reliability + Claude-Code-parity + agentic pass** (prompt: "add
+5. **Big reliability + Claude-Code-parity + agentic pass** (prompt: "add
    everything Claude Code has, make the UI look like Claude Code, make
    agentic coding better, it's lagging/crashing — fix it"). Scoped
    deliberately: told the user up front that "everything" isn't a
@@ -240,7 +454,7 @@ is wired there (`handleCommand`), not just declared in `commands/index.ts`.
      tail of Claude Code slash commands. "Everything" is a direction here,
      not a finish line.
 
-3. **`/link`'s browser page is now a picker, not all-or-nothing.** Every
+6. **`/link`'s browser page is now a picker, not all-or-nothing.** Every
    discovered item (Aqua API key, each BYOK custom provider) gets its own
    checkbox — checked by default so the old "import everything" behavior
    is still one click away — plus a Select all/Select none toggle. Only
@@ -276,7 +490,7 @@ is wired there (`handleCommand`), not just declared in `commands/index.ts`.
      clicking checkboxes in a real browser, though — worth a quick manual
      /link if you touch this page again.
 
-4. **Crash/glitch fixes ("it keeps crashing and glitching") + a small visual
+7. **Crash/glitch fixes ("it keeps crashing and glitching") + a small visual
    polish pass** — three separate, concrete bug classes, each verified
    against source (Ink's own, not just this repo's) before fixing, per this
    project's own "don't fabricate results" rule:
@@ -341,7 +555,7 @@ is wired there (`handleCommand`), not just declared in `commands/index.ts`.
      from pending to ✓ instead of freezing; try `/resume` on an older
      session) is worth doing before fully trusting it live.
 
-5. **`/link` connects ALL configured providers**, not just Aqua + OpenAI-
+8. **`/link` connects ALL configured providers**, not just Aqua + OpenAI-
    compatible BYOK. Root cause: `providers/chat.ts` only spoke the OpenAI-
    compatible wire format, so `link/localAuth.ts` silently *skipped* any
    custom provider saved in Anthropic Messages or Google Gemini native
@@ -362,7 +576,7 @@ is wired there (`handleCommand`), not just declared in `commands/index.ts`.
      confirming both new streaming paths correctly extract text end-to-end
      (see "Testing methodology" below for why this mattered).
 
-6. **Performance fix (the "it's lagging" report) + interrupt + thinking
+9. **Performance fix (the "it's lagging" report) + interrupt + thinking
    indicator:**
    - **Root cause of lag:** streaming pushed a full `setMessages` (→ full
      Markdown re-parse, and for code blocks a full `cli-highlight`
@@ -384,7 +598,7 @@ is wired there (`handleCommand`), not just declared in `commands/index.ts`.
      `setInterval`, so it doesn't add any extra re-renders to the rest of
      the tree.
 
-7. **Claude-Code-parity pass:**
+10. **Claude-Code-parity pass:**
    - New tools: `grep` (regex content search, skips `node_modules`/`.git`/
      build dirs, handles binary files and bad regex gracefully — see
      `tools/searchTools.ts`), `glob` (filename pattern match,

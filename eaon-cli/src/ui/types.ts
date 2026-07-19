@@ -6,6 +6,11 @@ import type { EaonMode } from "../types.js";
 import type { Quote } from "./quotes.js";
 import type { SessionSummary } from "../session/store.js";
 
+/** How a run of handleLink() (the /link flow) actually ended — shared
+ * between the /link command (which only cares about side effects) and
+ * WelcomeScreen (which shows a closing status line matching the outcome). */
+export type LinkOutcome = "linked" | "nothing_selected" | "nothing_found" | "cancelled" | "timed_out" | "no_platform_support" | "error";
+
 export type DisplayMessage =
   | {
       id: string;

@@ -63,10 +63,11 @@ program
   .option("--model <key>", "model key to start with, e.g. ollama:qwen3.6 (default: last used)")
   .option("--auto", "start in Auto permission mode (skips confirmation prompts) — use with care", false)
   .option("--cwd <path>", "project root (default: current directory)", process.cwd())
-  .option("--max-steps <n>", "cap on agent tool-call steps per turn", (v) => parseInt(v, 10), 40);
+  .option("--max-steps <n>", "cap on agent tool-call steps per turn", (v) => parseInt(v, 10), 40)
+  .option("--welcome", "force-show the first-run welcome/log-in screen even if already configured (for previewing it)", false);
 
 program.parse(process.argv);
-const opts = program.opts<{ print?: string; mode: string; model?: string; auto: boolean; cwd: string; maxSteps: number }>();
+const opts = program.opts<{ print?: string; mode: string; model?: string; auto: boolean; cwd: string; maxSteps: number; welcome: boolean }>();
 
 const projectRoot = path.resolve(opts.cwd);
 const mode = (opts.mode === "claw" ? "agent" : ["chat", "agent"].includes(opts.mode) ? opts.mode : "chat") as EaonMode;
@@ -91,7 +92,14 @@ if (opts.print) {
   process.exitCode = 1;
 } else {
   render(
-    <App version={readVersion()} initialMode={mode} initialModelKey={opts.model ?? null} projectRoot={projectRoot} startInAuto={opts.auto} />,
+    <App
+      version={readVersion()}
+      initialMode={mode}
+      initialModelKey={opts.model ?? null}
+      projectRoot={projectRoot}
+      startInAuto={opts.auto}
+      forceWelcome={opts.welcome}
+    />,
     { exitOnCtrlC: false }
   );
 }

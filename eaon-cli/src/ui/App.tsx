@@ -21,7 +21,7 @@ import { runShell } from "../tools/shellTool.js";
 import type { PathGuardContext } from "../tools/pathGuard.js";
 import { deriveTitle, listSessions, loadSession, newSession, saveSession, type Session } from "../session/store.js";
 import { PROJECT_NOTES_FILE, readProjectNotes, runInit } from "../project/init.js";
-import { applyDiscoveryToConfig, discoverDesktopCredentials, isLocalDiscoveryAvailable } from "../link/localAuth.js";
+import { applyDiscoveryToConfig, discoverDesktopCredentials, domainLabel, isLocalDiscoveryAvailable } from "../link/localAuth.js";
 import { runLinkServer } from "../link/server.js";
 import { platformLabel } from "../platform.js";
 import { Composer } from "./Composer.js";
@@ -29,9 +29,10 @@ import { PermissionPrompt } from "./PermissionPrompt.js";
 import { MessageView } from "./MessageView.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
 import { ModelPicker } from "./ModelPicker.js";
+import { WelcomeScreen } from "./WelcomeScreen.js";
 import { theme, MODE_LABEL, PERMISSION_COLORS, SPINNER_FRAMES } from "./theme.js";
 import { pickRandomQuote } from "./quotes.js";
-import type { DisplayMessage } from "./types.js";
+import type { DisplayMessage, LinkOutcome } from "./types.js";
 
 export interface AppProps {
   version: string;
@@ -39,6 +40,8 @@ export interface AppProps {
   initialModelKey: string | null;
   projectRoot: string;
   startInAuto: boolean;
+  /** --welcome: force the first-run screen even if already configured. */
+  forceWelcome?: boolean;
 }
 
 function turnsToDisplayMessages(turns: Turn[]): DisplayMessage[] {
@@ -253,9 +256,13 @@ function AutoModeConfirm({ onAnswer }: { onAnswer: (yes: boolean) => void }): Re
   );
 }
 
-export function App({ version, initialMode, initialModelKey, projectRoot, startInAuto }: AppProps): React.ReactElement {
+export function App({ version, initialMode, initialModelKey, projectRoot, startInAuto, forceWelcome }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const [config, setConfig] = useState(() => loadConfig());
+  // First install = no config file on disk yet — gates the one-time
+  // WelcomeScreen (see the render branch below). Persisted the moment that
+  // screen finishes, linked or not, so it can never show a second time.
+  const [welcomeDone, setWelcomeDone] = useState(() => !forceWelcome && fs.existsSync(configFile()));
   const [mode, setMode] = useState<EaonMode>(initialMode);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(startInAuto ? "auto" : "sandboxed");
   const [confirmingAuto, setConfirmingAuto] = useState(false);
@@ -551,16 +558,16 @@ export function App({ version, initialMode, initialModelKey, projectRoot, startI
     [config, pushSystem, refreshCatalog]
   );
 
-  const handleLink = useCallback(async () => {
+  const handleLink = useCallback(async (): Promise<LinkOutcome> => {
     if (!isLocalDiscoveryAvailable()) {
       pushSystem("/link reads Eaon Desktop's saved credentials from macOS UserDefaults, so it only works on a Mac with Eaon Desktop installed.", "error");
-      return;
+      return "no_platform_support";
     }
     pushSystem("Looking for Eaon Desktop's saved credentials on this Mac…");
     const discovery = discoverDesktopCredentials();
     if (!discovery.domain) {
       pushSystem("Couldn't find any saved Eaon Desktop credentials on this Mac — open Eaon Desktop and add an Aqua key or a custom provider first, then try /link again.", "error");
-      return;
+      return "nothing_found";
     }
 
     // The server-startup/network section below has real (if rare) failure
@@ -581,17 +588,17 @@ export function App({ version, initialMode, initialModelKey, projectRoot, startI
       const outcome = await result;
       if (outcome.timedOut) {
         pushSystem("Link expired after 3 minutes with no response — run /link again.", "error");
-        return;
+        return "timed_out";
       }
       if (!outcome.approved) {
         pushSystem("Cancelled — nothing was imported.", "info");
-        return;
+        return "cancelled";
       }
 
       const selection = { includeAquaKey: outcome.includeAquaKey, selectedProviderIds: outcome.selectedProviderIds };
       if (!selection.includeAquaKey && selection.selectedProviderIds.length === 0) {
         pushSystem("Nothing was checked on the page, so nothing was imported.", "info");
-        return;
+        return "nothing_selected";
       }
 
       const nextConfig = applyDiscoveryToConfig(config, discovery, selection);
@@ -615,17 +622,38 @@ export function App({ version, initialMode, initialModelKey, projectRoot, startI
       const parts: string[] = [];
       if (selection.includeAquaKey) parts.push(`Aqua API key (${aquaModelCount} model${aquaModelCount === 1 ? "" : "s"})`);
       if (importedProviders.length > 0) {
-        parts.push(
-          `${importedProviders.length} of ${discovery.customProviders.length} custom provider${discovery.customProviders.length === 1 ? "" : "s"} (${importedProviders.map((p) => p.displayName).join(", ")})`
-        );
+        // Merging both the debug and release build's saved providers (see
+        // discoverDesktopCredentials) means two different connections can
+        // share a display name — same disambiguation the picker page uses,
+        // so this summary doesn't read as "Aquadevs, Aquadevs".
+        const nameCounts = new Map<string, number>();
+        for (const p of discovery.customProviders) nameCounts.set(p.displayName, (nameCounts.get(p.displayName) ?? 0) + 1);
+        const names = importedProviders.map((p) => ((nameCounts.get(p.displayName) ?? 0) > 1 ? `${p.displayName} (${domainLabel(p.sourceDomain)})` : p.displayName));
+        parts.push(`${importedProviders.length} of ${discovery.customProviders.length} custom provider${discovery.customProviders.length === 1 ? "" : "s"} (${names.join(", ")})`);
       }
       const skippedNote = discovery.skippedUnrecognizedFormat > 0 ? ` (skipped ${discovery.skippedUnrecognizedFormat} in an unrecognized format)` : "";
       pushSystem(`Linked ✓ — imported ${parts.join(" and ")}${skippedNote}. Try /model to pick a cloud model.`, "success");
+      return "linked";
     } catch (e) {
       setCatalogLoading(false);
       pushSystem(`/link failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+      return "error";
     }
   }, [config, pushSystem]);
+
+  // Marks first-run as done regardless of how WelcomeScreen ended (linked,
+  // skipped, or nothing to link to) — writing SOME config file, even one
+  // that's still all defaults, is what keeps the screen from reappearing
+  // on the next launch (a successful link already writes one itself via
+  // handleLink above; this covers every other path).
+  const finishWelcome = useCallback(() => {
+    try {
+      saveConfig(config);
+    } catch {
+      // best-effort — a write failure here shouldn't block entering the app
+    }
+    setWelcomeDone(true);
+  }, [config]);
 
   const handleCompact = useCallback(async () => {
     const nonSystem = turnsRef.current.filter((t) => t.role !== "system");
@@ -1071,6 +1099,15 @@ export function App({ version, initialMode, initialModelKey, projectRoot, startI
   // handleCancel) — Claude Code's own "just start typing to redirect"
   // behavior, rather than forcing Esc-then-wait-then-retype.
   const composerActive = !pendingPermission && !confirmingAuto && !modelPickerOpen;
+
+  // First launch ever (no config file on disk yet): show the wordmark +
+  // log-in screen instead of the normal app. The startup effect above is
+  // still running regardless (catalog loading, banner queued) — it just
+  // isn't on screen yet — so the moment this finishes, everything is
+  // already warm.
+  if (!welcomeDone) {
+    return <WelcomeScreen version={version} platformSupportsLink={isLocalDiscoveryAvailable()} onLogin={handleLink} onFinish={finishWelcome} />;
+  }
 
   return (
     <Box flexDirection="column">
