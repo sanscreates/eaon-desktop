@@ -119,9 +119,42 @@ enum EaonCLILauncher {
         /// A read-only bundled copy exists inside the app and isn't installed
         /// yet — the Settings panel shows the Install button when this is true.
         let canInstall: Bool
+        /// The bundled copy's own version, whether or not anything is
+        /// installed yet — `nil` in a dev build with nothing bundled.
+        let bundledVersion: String?
 
         /// Both halves present → Eaon Code can launch the real CLI.
         var isReady: Bool { nodePath != nil && entryPoint != nil }
+
+        /// Non-nil exactly when something is already installed AND the copy
+        /// bundled in this app build is newer — the Settings panel shows the
+        /// Update button (instead of Install) when this is set. A fresh
+        /// install always runs the newest bundled copy already, so this and
+        /// `canInstall` can never both be true at once.
+        var updateAvailable: String? {
+            guard !canInstall, let installed = version, let bundled = bundledVersion,
+                  EaonCLILauncher.isNewerVersion(bundled, than: installed) else { return nil }
+            return bundled
+        }
+    }
+
+    /// Plain dot-separated integer comparison — same idea as
+    /// `UpdateChecker.isVersion(_:newerThan:)`, duplicated in miniature
+    /// rather than shared, since that one lives on the `@MainActor`
+    /// `UpdateChecker` and this type is deliberately actor-free (its whole
+    /// point is being safe to call from a background thread). Works for
+    /// both this app's CalVer (2026.3.1) and eaon-cli's semver (0.1.1) —
+    /// it's just component-wise integer comparison either way.
+    fileprivate static func isNewerVersion(_ candidate: String, than current: String) -> Bool {
+        let a = candidate.split(separator: ".").map { Int($0) ?? 0 }
+        let b = current.split(separator: ".").map { Int($0) ?? 0 }
+        let count = max(a.count, b.count)
+        for i in 0..<count {
+            let x = i < a.count ? a[i] : 0
+            let y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
     }
 
     /// Blocking (spawns a login shell to resolve `node` as a last resort) —
@@ -130,12 +163,14 @@ enum EaonCLILauncher {
         let node = findNode()
         let entryPoint = findCLIEntryPoint()
         let directory = cliDirectory(fromEntryPoint: entryPoint)
+        let bundledDir = bundledPayloadDirectory()
         return Status(
             nodePath: node,
             entryPoint: entryPoint,
             cliDirectory: directory,
             version: directory.flatMap(readVersion(inDirectory:)),
-            canInstall: entryPoint == nil && bundledPayloadDirectory() != nil
+            canInstall: entryPoint == nil && bundledDir != nil,
+            bundledVersion: bundledDir.flatMap(readVersion(inDirectory:))
         )
     }
 
@@ -183,6 +218,11 @@ enum EaonCLILauncher {
     /// Copies the bundled CLI to `installedDirectory` and writes the global
     /// `eaon` shim. Pure file I/O — no network, no npm — so it's fast and
     /// works offline. Call off the main thread.
+    ///
+    /// Also what `update()` calls: an update to a newer bundled copy is the
+    /// exact same operation as a fresh install (wipe `installedDirectory`,
+    /// recopy, rewrite the shim) — the CLI's config/sessions live in the
+    /// separate `configDirectory` (`~/.eaon/cli`) and are never touched.
     static func install() throws {
         guard let source = bundledPayloadDirectory() else { throw InstallError.noBundledPayload }
         let fm = FileManager.default
@@ -199,6 +239,14 @@ enum EaonCLILauncher {
         } catch {
             throw InstallError.copyFailed(error)
         }
+    }
+
+    /// Updates an already-installed CLI to the version bundled in this app
+    /// build — see `Status.updateAvailable` for when this is actually
+    /// offered. Named separately from `install()` for a clear call site
+    /// even though the operation is identical; call off the main thread.
+    static func update() throws {
+        try install()
     }
 
     /// Removes both the installed copy and the global shim. Leaves the

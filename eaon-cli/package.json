@@ -1,6 +1,6 @@
 {
   "name": "eaon-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Eaon in your terminal — agentic coding, Eaon Claw, and chat, for any model: local (Ollama) or hosted (Aqua / BYOK).",
   "type": "module",
   "license": "MIT",

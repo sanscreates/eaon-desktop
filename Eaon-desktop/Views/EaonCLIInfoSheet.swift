@@ -21,6 +21,8 @@ struct EaonCLIInfoSheet: View {
     @State private var copiedField: String?
     @State private var isInstalling = false
     @State private var installErrorMessage: String?
+    @State private var isUpdating = false
+    @State private var updateErrorMessage: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,6 +34,9 @@ struct EaonCLIInfoSheet: View {
                     statusCard
                     if status?.canInstall == true {
                         installCard
+                    }
+                    if status?.updateAvailable != nil {
+                        updateCard
                     }
                     terminalCard
                     configCard
@@ -65,6 +70,14 @@ struct EaonCLIInfoSheet: View {
                         Text("v\(version)")
                             .font(AppFont.mono(11, weight: .medium))
                             .foregroundStyle(colors.textTertiary)
+                    }
+                    if let newer = status?.updateAvailable {
+                        Text("v\(newer) available")
+                            .font(AppFont.mono(10, weight: .semibold))
+                            .foregroundStyle(Color(hex: "#3B82F6"))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color(hex: "#3B82F6").opacity(0.14)))
                     }
                 }
                 Text("Eaon in your terminal — for any model, local or hosted.")
@@ -251,6 +264,68 @@ struct EaonCLIInfoSheet: View {
                 installErrorMessage = error.localizedDescription
             }
             isInstalling = false
+        }
+    }
+
+    // MARK: Update
+
+    private var updateCard: some View {
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Update available")
+                    .font(AppFont.mono(13, weight: .semibold))
+                    .foregroundStyle(colors.textPrimary)
+                if let installed = status?.version, let newer = status?.updateAvailable {
+                    Text("This app now bundles Eaon CLI v\(newer) — you have v\(installed) installed. Updating replaces the program files at \(displayPath(EaonCLILauncher.installedDirectory)); your config and sessions in \(displayPath(EaonCLILauncher.configDirectory)) are untouched.")
+                        .font(AppFont.sans(12))
+                        .foregroundStyle(colors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let updateErrorMessage {
+                    Text(updateErrorMessage)
+                        .font(AppFont.sans(11))
+                        .foregroundStyle(Color(hex: "#F59E0B"))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack {
+                    Button {
+                        updateEaonCLI()
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isUpdating {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 11))
+                            }
+                            Text(isUpdating ? "Updating…" : "Update Eaon CLI")
+                                .font(AppFont.mono(12, weight: .medium))
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .disabled(isUpdating)
+                    Spacer()
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func updateEaonCLI() {
+        isUpdating = true
+        updateErrorMessage = nil
+        Task {
+            do {
+                try await Task.detached { try EaonCLILauncher.update() }.value
+                let resolved = await Task.detached { EaonCLILauncher.status() }.value
+                status = resolved
+            } catch {
+                updateErrorMessage = error.localizedDescription
+            }
+            isUpdating = false
         }
     }
 

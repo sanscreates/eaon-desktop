@@ -24,6 +24,7 @@ import { PROJECT_NOTES_FILE, readProjectNotes, runInit } from "../project/init.j
 import { applyDiscoveryToConfig, discoverDesktopCredentials, domainLabel, isLocalDiscoveryAvailable } from "../link/localAuth.js";
 import { runLinkServer } from "../link/server.js";
 import { platformLabel } from "../platform.js";
+import { checkForBundledUpdate, updateNoticeLine } from "../updateCheck.js";
 import { Composer } from "./Composer.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
 import { MessageView } from "./MessageView.js";
@@ -359,6 +360,8 @@ export function App({ version, initialMode, initialModelKey, projectRoot, startI
       const notes = readProjectNotes(projectRoot);
       if (result.aquaError) pushSystem(`Aqua models unavailable: ${result.aquaError}`, "error");
       if (notes) pushSystem("Loaded EAON.md for project context.", "info");
+      const bundledUpdate = checkForBundledUpdate(version);
+      if (bundledUpdate) pushSystem(updateNoticeLine(bundledUpdate), "info");
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

@@ -99,6 +99,7 @@ struct GeneralSettingsView: View {
 
     private var cliStatusDescription: String {
         guard let cliStatus else { return "Checking…" }
+        if let newer = cliStatus.updateAvailable { return "Update available — v\(newer). Open Manage to update." }
         if cliStatus.isReady { return "Ready — Eaon Code launches it automatically." }
         if cliStatus.nodePath == nil { return "Node.js not found. Open Manage for setup steps." }
         return "Not built yet. Open Manage for the setup commands." }
