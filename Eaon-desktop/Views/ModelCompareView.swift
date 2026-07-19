@@ -87,6 +87,7 @@ struct ModelCompareView: View {
                     } else {
                         Image(systemName: "play.fill")
                             .font(.system(size: 11, weight: .semibold))
+                            .iconHoverEffect(for: "play.fill")
                     }
                     Text(vm.isRunning ? "Running…" : "Run")
                         .font(.system(size: 13, weight: .semibold))
@@ -238,6 +239,7 @@ private struct CompareColumn: View {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundColor(colors.textTertiary)
+                        .iconHoverEffect(for: "chevron.down")
                 }
             }
             .menuStyle(.borderlessButton)
@@ -251,6 +253,7 @@ private struct CompareColumn: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(colors.textTertiary)
+                        .iconHoverEffect(for: "xmark")
                 }
                 .buttonStyle(.plain)
             }

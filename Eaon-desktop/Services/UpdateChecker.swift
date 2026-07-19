@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import SwiftUI
 
@@ -8,7 +9,7 @@ import SwiftUI
 /// the LAST step of cutting a release, so a freshly-updated app never
 /// thinks the manifest's version is still newer than itself.
 enum AppVersion {
-    static let current = "2026.2.0"
+    static let current = "2026.3.0"
 }
 
 /// What the update server hosts — one small JSON file describing the newest
@@ -19,6 +20,14 @@ struct UpdateManifest: Decodable, Equatable {
     let downloadURL: URL
     /// Optional — the card's "Show Release Notes" simply hides when absent.
     let releaseNotes: String?
+    /// Lowercase hex SHA-256 of the release .zip. The manifest is served
+    /// over HTTPS from a host we control, so this pins the exact bytes the
+    /// release author published: even if the download host or CDN is
+    /// compromised (or the transfer is corrupted), a mismatch stops the
+    /// tampered binary before it's ever installed and run. Optional so an
+    /// older manifest without it still works — but when present it is
+    /// enforced, and `RELEASING-UPDATES.md` should require it going forward.
+    let sha256: String?
 }
 
 /// Checks for updates on launch, drives the "New Version" card, and runs
@@ -145,7 +154,7 @@ final class UpdateChecker {
         // Always hit the origin — a stale cached manifest could re-announce
         // an update the user already installed.
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await AppHTTP.session.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let manifest = try? JSONDecoder().decode(UpdateManifest.self, from: data) else { return nil }
         return manifest
@@ -206,7 +215,7 @@ final class UpdateChecker {
     }
 
     private func download(manifest: UpdateManifest) async throws -> URL {
-        let (bytes, response) = try await URLSession.shared.bytes(from: manifest.downloadURL)
+        let (bytes, response) = try await AppHTTP.session.bytes(from: manifest.downloadURL)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
@@ -244,7 +253,41 @@ final class UpdateChecker {
             try? FileManager.default.removeItem(at: destination)
             throw URLError(.zeroByteResource)
         }
+
+        // Integrity gate: when the (HTTPS-pinned) manifest carries a hash,
+        // the downloaded bytes MUST match it or they don't get installed.
+        // This is what makes a compromised download host / CDN unable to
+        // ship a tampered binary — the bytes are verified against what the
+        // release author published, not merely "arrived over TLS".
+        if let expectedHash = manifest.sha256?.trimmingCharacters(in: .whitespaces).lowercased(), !expectedHash.isEmpty {
+            let actualHash = try Self.sha256Hex(ofFileAt: destination)
+            guard actualHash == expectedHash else {
+                try? FileManager.default.removeItem(at: destination)
+                throw UpdateIntegrityError.hashMismatch(expected: expectedHash, actual: actualHash)
+            }
+        }
         return destination
+    }
+
+    enum UpdateIntegrityError: LocalizedError {
+        case hashMismatch(expected: String, actual: String)
+        var errorDescription: String? {
+            "This update failed its security check and was not installed — the download didn't match the signed release. Your current version is untouched. Try again, or download the latest from eaon.dev."
+        }
+    }
+
+    /// Streams the file through SHA-256 so a large .zip never has to be held
+    /// in memory all at once.
+    private static func sha256Hex(ofFileAt url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = try handle.read(upToCount: 1 << 20) ?? Data()
+            if chunk.isEmpty { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Version comparison

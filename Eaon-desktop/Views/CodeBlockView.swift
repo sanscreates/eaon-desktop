@@ -50,6 +50,7 @@ struct CodeBlockView: View {
             Button(action: copyCode) {
                 HStack(spacing: 4) {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .iconHoverEffect(for: copied ? "checkmark" : "doc.on.doc")
                     Text(copied ? "Copied" : "Copy")
                 }
                 .font(AppFont.mono(12, weight: .medium))

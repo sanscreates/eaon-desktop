@@ -207,9 +207,11 @@ enum MemoryExtractor {
     /// never drift apart on what qualifies.
     private static let whatToRemember = """
     Reply with ONLY a JSON array (no markdown, no commentary) of objects like {"kind": "fact", "text": "..."} or {"kind": "event", "text": "..."}.
-    - "fact": durable — their name, role, location, relationships, preferences, ongoing projects, things that stay true.
+    - "fact": durable and HIGH-LEVEL — their name, role, location, relationships, preferences, and (at most) a single one-line summary of an ongoing project: what it's called and what it does. NEVER extract implementation detail as separate facts — file paths, folder structure, tool/function names, framework or library choices, entry points, build steps. That's the CONTENT of a coding task, not a fact about the user, and it's already useless the moment the project's architecture changes. Bad (never do this): {"text": "File structure: src/app.js, src/tools"}, {"text": "Tools: write_file, str_replace, read_file"}, {"text": "Framework: TypeScript"}, {"text": "Editor: Monaco"}. Good: {"text": "is building 'Lume Labs', an agentic AI coding platform"} — ONE fact, not ten.
     - "event": a happening in their life a thoughtful friend would remember and ask about later — a trip, an exam, an interview, being sick, a hard week, weekend plans, something they're excited or worried about. Keep any stated timing in the text itself (e.g. "has a math final on Friday").
-    Never include: one-off requests to the assistant (like a coding task), facts about the assistant, anything already in the known list, guesses, or sensitive details (health, finances, other people's private information) beyond what the user plainly volunteered as worth remembering.
+    Extract ONLY from what the User themself wrote. The Assistant's words are context for understanding the User's message — never a source of facts; nothing the Assistant said, listed, or built qualifies on its own.
+    Never include: one-off requests to the assistant (like a coding task, including its implementation details), facts about the assistant, anything already in the known list, guesses, or sensitive details (health, finances, other people's private information) beyond what the user plainly volunteered as worth remembering.
+    When in doubt, extract NOTHING for that item — a handful of high-value facts beats a long list of granular ones; the model reading them back later has to make sense of the whole list at once, not just the one you're adding now.
     Reply with [] if nothing qualifies.
     """
 
@@ -238,13 +240,20 @@ enum MemoryExtractor {
 
     private static func buildPrompt(userText: String, assistantText: String, toolContext: String?, existing: [String]) -> String {
         let known = existing.isEmpty ? "(nothing yet)" : existing.map { "- \($0)" }.joined(separator: "\n")
+        // The assistant reply is context only (the prompt says so
+        // explicitly) — capped hard, because a long technical answer fed
+        // in wholesale is exactly where a weak extractor model went
+        // mining for "facts" that were really implementation details of
+        // its own previous reply. The user's text keeps far more room:
+        // it's the only sanctioned source.
+        let cappedAssistant = String(assistantText.prefix(1_500))
         var sections = """
         Already known about the user:
         \(known)
 
         Latest exchange:
-        User: \(userText)
-        Assistant: \(assistantText)
+        User: \(String(userText.prefix(4_000)))
+        Assistant (context only, never a source of facts): \(cappedAssistant)
         """
         if let toolContext, !toolContext.isEmpty {
             sections += """
@@ -322,7 +331,7 @@ enum MemoryExtractor {
             "model": modelId, "messages": apiMessages, "stream": true,
         ])
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await AppHTTP.session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }

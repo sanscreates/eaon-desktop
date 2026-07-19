@@ -46,7 +46,7 @@ struct LocalAPIServerSettingsView: View {
                 Text("What this does")
                     .font(AppFont.mono(13, weight: .semibold))
                     .foregroundColor(colors.textPrimary)
-                Text("Turns this Mac into a local OpenAI-compatible server. Any tool that can call an OpenAI-style chat API — a script, a coding CLI, another app — can point at Eaon's base URL below and use whichever model you have configured here: Aqua, a BYOK key, or a local Ollama/llama.cpp/MLX model. It forwards the exact conversation it's given — no memory, custom instructions, or plugin tools are injected.")
+                Text("Turns this Mac into a local OpenAI-compatible server. Any tool that can call an OpenAI-style chat API — a script, a coding CLI, another app — can point at Eaon's base URL below and use whichever model you have configured here: Eaon, a BYOK key, or a local Ollama/llama.cpp/MLX model. It forwards the exact conversation it's given — no memory, custom instructions, or plugin tools are injected.")
                     .font(AppFont.sans(12))
                     .foregroundColor(colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -81,7 +81,7 @@ struct LocalAPIServerSettingsView: View {
                 Toggle("", isOn: $store.isEnabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .tint(AppearanceSettings.shared.accentColor)
+                    .tint(AppearanceSettings.toggleTint)
             }
             .padding(18)
         }
@@ -163,7 +163,7 @@ struct LocalAPIServerSettingsView: View {
                     Toggle("", isOn: $store.requireAPIKey)
                         .labelsHidden()
                         .toggleStyle(.switch)
-                        .tint(AppearanceSettings.shared.accentColor)
+                        .tint(AppearanceSettings.toggleTint)
                 }
                 .padding(18)
 
@@ -209,6 +209,7 @@ struct LocalAPIServerSettingsView: View {
                 Image(systemName: copiedField == field ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 12))
                     .foregroundColor(colors.textSecondary)
+                    .iconHoverEffect(for: copiedField == field ? "checkmark" : "doc.on.doc")
             }
             .buttonStyle(.plain)
         }

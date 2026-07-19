@@ -124,6 +124,9 @@ struct ToolCallAccumulator {
             if partial.name == WebSearchTool.nativeFunctionName {
                 return "```eaon:search\n\(args.isEmpty ? "{}" : args)\n```"
             }
+            if partial.name == ImageGenerationTool.nativeFunctionName {
+                return "```eaon:image\n\(args.isEmpty ? "{}" : args)\n```"
+            }
             // Desktop-control tools (`computer_<tool>`) are checked before the
             // MCP `server__tool` split — their single-underscore prefix can't
             // collide with the double-underscore convention, and they route

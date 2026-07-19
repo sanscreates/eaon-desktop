@@ -105,15 +105,20 @@ final class CompareViewModel {
         }
         messages.append(["role": "user", "content": prompt])
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": slot.modelId,
             "messages": messages,
             "stream": true,
         ]
+        // Same global sampling parameters the main chat uses, so a comparison
+        // reflects the settings the user actually chats with.
+        for (key, value) in ModelParametersStore.shared.effectiveParameters.openAIFields() {
+            body[key] = value
+        }
 
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            let (bytes, response) = try await AppHTTP.session.bytes(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse,
                   httpResponse.statusCode == 200 else {

@@ -3,6 +3,7 @@ import SwiftUI
 struct AppearanceSettingsView: View {
     @Environment(\.themeColors) private var colors
     @Bindable private var settings = AppearanceSettings.shared
+    @Bindable private var fontStore = FontPreferenceStore.shared
     @State private var showResetConfirm = false
 
     var body: some View {
@@ -17,6 +18,7 @@ struct AppearanceSettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     themeSection
+                    fontSection
                     chatSection
                     resetRow
                 }
@@ -29,6 +31,7 @@ struct AppearanceSettingsView: View {
         .alert("Reset Appearance?", isPresented: $showResetConfirm) {
             Button("Reset", role: .destructive) {
                 settings.resetToDefaults()
+                fontStore.fontId = "spaceGrotesk"
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -64,12 +67,31 @@ struct AppearanceSettingsView: View {
                     }
 
                     settingsDivider
-                    settingsRow("Accent Color", description: "Used for buttons, links, and selection states.") {
+                    settingsRow("Accent Color", description: "Used for buttons, links, and selection states. \"Default\" spreads a set of colors across the app instead of using one; pick a single color to make everything match.") {
                         EmptyView()
                     }
                     .padding(.bottom, 4)
 
                     accentColorGrid
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 18)
+                }
+            }
+        }
+    }
+
+    private var fontSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionLabel("Font")
+
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 0) {
+                    settingsRow("Typeface", description: "One font, used everywhere Eaon uses its own font — chat text, labels, and code. Search hundreds of options: a few featured picks, plus everything already installed on this Mac.") {
+                        EmptyView()
+                    }
+                    .padding(.bottom, 4)
+
+                    FontOptionPicker(selectedId: $fontStore.fontId, accentColor: settings.accentColor)
                         .padding(.horizontal, 20)
                         .padding(.bottom, 18)
                 }
@@ -86,14 +108,14 @@ struct AppearanceSettingsView: View {
                     settingsRow("Colored user bubble", description: "Tint your own messages with the accent color instead of a neutral gray.") {
                         Toggle("", isOn: $settings.coloredUserBubble)
                             .toggleStyle(.switch)
-                            .tint(settings.accentColor)
+                            .tint(AppearanceSettings.toggleTint)
                     }
 
                     settingsDivider
                     settingsRow("Show token speed", description: "Display tokens/sec and token count inline below assistant messages.") {
                         Toggle("", isOn: $settings.showTokenSpeed)
                             .toggleStyle(.switch)
-                            .tint(settings.accentColor)
+                            .tint(AppearanceSettings.toggleTint)
                     }
                 }
             }
@@ -107,6 +129,7 @@ struct AppearanceSettingsView: View {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.counterclockwise")
                     .font(.system(size: 12, weight: .semibold))
+                    .iconHoverEffect(for: "arrow.counterclockwise")
                 Text("Reset appearance to defaults")
                     .font(AppFont.mono(13, weight: .medium))
             }
@@ -160,13 +183,30 @@ struct AppearanceSettingsView: View {
         }
     }
 
+    /// The "Default" swatch is a conic multicolor ring — a visual signal that
+    /// it isn't one flat color but the whole palette spread across the app.
+    private var defaultSwatchFill: AngularGradient {
+        AngularGradient(
+            colors: AppearanceSettings.defaultAccentPalette + [AppearanceSettings.defaultAccentPalette[0]],
+            center: .center
+        )
+    }
+
+    @ViewBuilder
+    private func swatchShape(_ option: AccentColorOption) -> some View {
+        if option.id == "default" {
+            Circle().fill(defaultSwatchFill)
+        } else {
+            Circle().fill(option.color)
+        }
+    }
+
     private func accentSwatch(_ option: AccentColorOption) -> some View {
         let isSelected = settings.accentColorId == option.id
         // A white checkmark vanishes on the white swatch itself — resolve per
         // option rather than assuming every accent is dark enough for it.
         let checkmarkColor: Color = option.id == "white" ? .black : .white
-        return Circle()
-            .fill(option.color)
+        return swatchShape(option)
             .frame(width: 30, height: 30)
             .overlay {
                 if isSelected {
@@ -187,7 +227,7 @@ struct AppearanceSettingsView: View {
             .onTapGesture {
                 settings.accentColorId = option.id
             }
-            .help(option.id.capitalized)
+            .help(option.id == "default" ? "Default — a spread of colors across the app" : option.id.capitalized)
     }
 
     private func themedPicker<S: Hashable, Content: View>(

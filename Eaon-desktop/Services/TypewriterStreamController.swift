@@ -62,7 +62,7 @@ final class TypewriterStreamController {
         guard !instant else { return }
 
         while displayedCount < characters.count {
-            try? await Task.sleep(for: tickDelay())
+            try? await Task.sleep(for: Self.tick)
         }
 
         while typingTask != nil {
@@ -78,6 +78,19 @@ final class TypewriterStreamController {
         onDisplayUpdate(String(characters))
     }
 
+    /// One reveal per ~display frame, never faster. The old loop shrank the
+    /// DELAY as backlog grew (down to 3ms — ~330 updates/s), but every
+    /// update here is a full `messages` mutation: the transcript re-diffs,
+    /// the streaming cell re-parses its whole content, the context badge
+    /// re-walks the conversation, and the follow-scroll re-resolves layout.
+    /// A display shows at most 120 of those a second, and text reveal reads
+    /// as continuous well below that — so past ~60Hz the extra updates were
+    /// pure invisible CPU burn (measured live as the main thread saturating
+    /// during fast streams: the reported scroll lag). Same chars-per-second
+    /// reveal rates as before, expressed as bigger steps at a fixed 16ms
+    /// tick instead of small steps at a frantic one.
+    private static let tick = Duration.milliseconds(16)
+
     private func startTypingIfNeeded() {
         guard typingTask == nil else { return }
 
@@ -89,7 +102,7 @@ final class TypewriterStreamController {
                     let step = revealStep(for: pending)
                     displayedCount = min(characters.count, displayedCount + step)
                     onDisplayUpdate(String(characters.prefix(displayedCount)))
-                    try? await Task.sleep(for: tickDelay())
+                    try? await Task.sleep(for: Self.tick)
                 } else if streamFinished {
                     break
                 } else {
@@ -100,39 +113,24 @@ final class TypewriterStreamController {
         }
     }
 
-    /// Reveal more characters per tick when the model streams faster or backlog grows.
+    /// Characters to reveal this tick — the same effective chars/sec the
+    /// old step-and-delay pairs produced (faster arrival or a growing
+    /// backlog still accelerates the reveal), just re-expressed at the
+    /// fixed frame-rate tick.
     private func revealStep(for pending: Int) -> Int {
         let speed = max(20, min(420, recentArrivalRate))
         let speedFactor = speed / 120
 
+        let perSecond: Double
         if pending > 300 {
-            return min(pending, Int(10 + speedFactor * 18))
+            perSecond = 3400 + 6000 * speedFactor
+        } else if pending > 100 {
+            perSecond = 800 + 1600 * speedFactor
+        } else if pending > 25 {
+            perSecond = 400 + 600 * speedFactor
+        } else {
+            perSecond = speed
         }
-        if pending > 100 {
-            return min(pending, Int(4 + speedFactor * 8))
-        }
-        if pending > 25 {
-            return min(pending, Int(2 + speedFactor * 3))
-        }
-        return 1
-    }
-
-    private func tickDelay() -> Duration {
-        let pending = backlog
-        let speed = max(20, min(420, recentArrivalRate))
-
-        if pending == 0 {
-            return .milliseconds(12)
-        }
-
-        if pending > 250 {
-            return .milliseconds(3)
-        }
-        if pending > 80 {
-            return .milliseconds(5)
-        }
-
-        let milliseconds = Int(1000 / speed)
-        return .milliseconds(max(4, min(16, milliseconds)))
+        return min(pending, max(1, Int(perSecond * 0.016)))
     }
 }

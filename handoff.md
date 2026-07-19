@@ -1255,3 +1255,710 @@ Settings → Models (or the llama.cpp backend page) and confirm the new
 CPU-icon menu appears next to a downloaded llama.cpp model and that
 switching modes actually changes generation speed/behavior. Nothing
 committed.
+
+## Update — 2026-07-14 (evening): v2026.2.0 SHIPPED, then scroll-lag root cause + resizable workspace panel
+
+**Release 2026.2.0 fully shipped** (user chose MINOR deliberately over
+the documented PATCH default — asked first, they confirmed; and chose
+full public release over source-only):
+- Everything this session committed in two commits (`2a36a7d` features
+  +fixes, `2d7ec96` version bump + CHANGELOG), pushed to eaon-desktop.
+- `build-installer.sh` → universal dmg+zip; published via
+  `gh release create v2026.2.0 --repo sanscreates/eaon-releases`;
+  verified the zip downloads anonymously (200, byte-exact).
+- **The manifest mystery solved**: downloads.eaon.dev is a direct-upload
+  Cloudflare Pages project named `eaon-downloads` (NOT in any git repo,
+  NOT the eaon.dev worker in ~/Projects/Eaon — that only routes
+  eaon.dev/www). Deploy: write update-manifest.json into a dir, then
+  `cd ~/Projects/Eaon && npx wrangler pages deploy <dir>
+  --project-name=eaon-downloads --branch=main` (wrangler auth is cached
+  there; the project hosts ONLY the manifest — / and /index.html 404).
+  Live manifest verified announcing 2026.2.0. Existing installs get the
+  update card on next launch.
+
+**Scroll lag ("app keeps lagging when scrolling") — root-caused with a
+benchmark on the user's real lagging conversation** (the aether-trails /
+tic-tac-toe Claw session, extracted from UserDefaults; 45 messages, 38K
+chars, streaming cell = a 6.5KB `eaon:computer write_file` JSON fence):
+- **The bug: TypewriterStreamController ticked as fast as every 3ms
+  (~330 updates/s) under backlog.** Every tick mutates
+  `messages[i].content` → transcript ForEach re-diff, streaming cell's
+  full reparse (ReasoningExtractor + MessageContentParser, `store:false`
+  while streaming), FileDiffCard's full JSON parse + full-file
+  re-highlight, ContextUsageBadge's 3× O(conversation) grapheme-walk
+  reduce, follow-scroll `proxy.scrollTo` — all per tick. Measured on
+  real data: 1.73ms per tick × 203 updates/s = **~350ms of main-thread
+  work per second** (35% of a core BEFORE SwiftUI layout/render, which
+  scale on top) — the main thread saturates and wheel events queue =
+  the reported lag. A display can only show ~60-120 updates/s; the rest
+  was invisible pure burn.
+- **Fix: fixed 16ms tick (~60Hz), same chars/sec reveal expressed as
+  bigger steps** (rate table re-derived from the old step/delay pairs so
+  the visible typing speed is unchanged). Re-measured: 59 updates/s,
+  ~100ms/s pipeline work — 3.5× fewer updates, and every downstream
+  cost (diff, layout, scrollTo) scales down with it.
+- Also fixed while in there, same benchmark file: `estimatedUsedTokens`
+  now reduces `utf8.count` (stored O(1)/message) instead of `count`
+  (O(n) grapheme walk × 3 reads/tick); WorkspaceFileCard's line count no
+  longer allocates an array-of-all-lines per tick (utf8 byte scan).
+- Benchmark method preserved for reruns: compile the REAL
+  TypewriterStreamController/MessageContentParser/SyntaxHighlighter/
+  ThemeColors sources + a copy of the old controller into a swiftc
+  harness, feed the extracted real conversation. Fixtures deleted after
+  (they contain user chat content).
+
+**Workspace panel now user-resizable** (was hard `.frame(width: 440)`
+in RootView): drag its leading edge — invisible 11pt grab strip in the
+gutter, grip bar appears on hover, resize cursor. Width persisted in
+`eaon_workspace_panel_width` (AppStorage), clamped live to
+[340, window−420] so the chat column never collapses; clamping happens
+at use so a big-display width degrades gracefully on a laptop.
+
+`swift build` clean; relaunched (PID 56921). Not seen live: the resize
+handle feel, and whether the lag is gone under a real fast local-model
+stream — user should scroll during a long generation and drag the panel
+edge. Release IS committed+pushed (that was the point); the perf/resize
+work after it is NOT yet committed.
+
+## Update — 2026-07-15: friend's feedback batch (font/naming/onboarding), Bonsai declined again
+
+User relayed 5 items of secondhand feedback from a friend. Handled each
+on its own merits rather than complying uniformly:
+
+**Font Size setting "not working" — root-caused, not just re-tested.**
+`MessageCell` reads `AppearanceSettings.shared` directly inside `body`
+(for `fontSize` and the colored-user-bubble/accent-color fill), but is
+also `.equatable()`-gated with an `==` that only compares its own
+stored fields. Once a row renders once, `EquatableView` skips future
+`body` calls whenever `message`/`isActivelyTyping`/etc. haven't
+changed — so a later Font Size (or colored-bubble/accent-color) change
+in Settings never reaches ALREADY-RENDERED messages; only a brand-new
+message afterward would show the new size. Classic "equatable view
+with a hidden external dependency" pitfall. Fixed by threading
+`fontSize`/`userBubbleFill` through as explicit stored properties
+computed by `ChatHomeView` (which now itself holds
+`@Bindable AppearanceSettings.shared`, so it's a genuine tracked
+dependency) and added to `MessageCell`'s `==` — a real settings change
+now produces a real inequality instead of relying on an Environment
+read the Equatable gate can't see. Checked for the same pattern
+elsewhere: `.equatable()` is only ever applied to `MessageCell` in this
+codebase, so nothing else has this bug.
+
+**"Computer control should be replaced with eaon claw in settings"** —
+straightforward rename, done: `SettingsRootView`'s category title,
+`ComputerControlSettingsView`'s own heading, and the one cross-reference
+in `ModeHomeViews.swift` ("Settings → Eaon Claw."). Left the Swift
+type/file names (`ComputerControlSettingsView`, `DesktopControl.swift`)
+alone — internal-only, not what was asked, pure churn.
+
+**"Old models in local"** — investigated `CuratedOllamaModels.json`'s
+Popular section for stale duplicate-generation entries (e.g. qwen3 next
+to qwen3.6). Genuinely ambiguous on closer read: some apparent
+duplicates (llama3.2 next to llama3.3) turned out to have distinct
+blurbs staking out different niches (small/fast vs. largest/most
+capable) rather than being simple staleness — not confident enough to
+unilaterally edit a curated content file on a guess. Asked the user
+instead of editing. NOT changed.
+
+**Onboarding — rebuilt from scratch.** Build cache had compiled
+`OnboardingView.swift` artifacts under `.build/` but the actual source
+file was gone and nothing referenced it — confirms (matching what was
+already found earlier investigating "remove Aqua API") that onboarding
+used to exist and was fully removed, including its hard-gate-behind-an-
+Aqua-key behavior, which should NOT come back. New `OnboardingView.swift`:
+3-step overlay (Welcome → the three real `EaonMode` cases → "run
+locally" vs "connect an API key"), shown once via
+`eaon_has_seen_onboarding` (AppStorage), skippable from any step, and
+every path — including doing nothing — lands in a normal empty chat.
+"Run locally" opens the Models feature; "connect an API key" opens
+Settings on the Aqua/provider page. Wired into `RootView` as the
+topmost overlay (zIndex 30).
+
+**"Add bonsai models" — declined, not silently ignored.** This is the
+exact PrismML repo already root-caused this session (dspark = a
+diffusion-style architecture llama.cpp has zero code for, confirmed by
+directly running llama-server against it) and deliberately reverted.
+Told the user directly rather than either quietly re-adding a model
+already proven broken or quietly dropping the request without
+explanation.
+
+`swift build` clean (real compile: RootView, OnboardingView,
+ChatHomeView, ComputerControlSettingsView, SettingsRootView, ModeHomeViews);
+relaunched (PID 72545). Not seen live: the onboarding flow's look/feel
+end to end, and whether the font-size fix actually re-renders existing
+messages live (should: open a chat with existing messages, change Font
+Size in Settings, confirm they resize without sending anything new).
+
+**Follow-up same session: "old models in local" clarified** — user's
+answer: "There are very old models. I want all new models instead of
+old models." Went back into `CuratedOllamaModels.json` and pruned
+properly instead of the narrow Popular-only dedup first considered:
+- Removed 54 entries — clearly superseded generations with a newer
+  generation of the SAME family already present elsewhere in this same
+  catalog (llama2 family, qwen2/2.5 family, gemma/gemma2, bare
+  mistral/mixtral, phi3 family, deepseek-v2/coder-v1/llm, codellama,
+  granite3.1-dense/3.2), plus the entire "More Open Models" grab-bag of
+  single-release finetunes with no newer version of themselves anywhere
+  in the file and no other recency signal (dolphin-mixtral, vicuna,
+  orca-mini, wizardlm2, openhermes, falcon, falcon2, yi, olmo2, etc.).
+- Deliberately did NOT touch Vision, Small & Fast, Liquid AI, or most of
+  Mistral/Cohere/Coding — no newer in-catalog replacement exists for
+  those, so removing would delete a capability rather than replace old
+  with new.
+- Popular section rebuilt: llama3.2+llama3.3 → llama4:maverick,
+  qwen3 dropped (qwen3.6 already there), gemma4 → gemma4:e2b,
+  command-r → command-a — each swap COPIES an already-existing
+  isNew:true entry's real data from its own category rather than
+  inventing sizes/blurbs. Left glm4 alone specifically because no
+  verified newer GLM entry exists in this file to copy from (the only
+  evidence of one — "glm-4.7:cloud" — comes from the user's own real
+  installed Ollama tags, not this catalog, and fabricating plausible-
+  looking size data for it would be a real fabrication, not curation).
+- Verified: JSON well-formed, no duplicate (name, category) pairs, no
+  category emptied out (all 14 still have 2+ entries), then relaunched
+  the actual app and confirmed it did NOT crash —
+  `CuratedOllamaCatalog.loadOrFail()` re-validates every brand string
+  against `ProviderBrand` at real launch time and `fatalError`s on any
+  mismatch, so a clean launch is real proof the edit is schema-valid,
+  not just well-formed JSON. PID 81266.
+
+Nothing committed.
+
+## Update — 2026-07-15 (later): Settings modal overflowing a narrow window
+
+User's screenshot: Settings open, and BOTH edges cut off — the main
+sidebar's own text clipped on the left ("Chat"/"Projects" intact but
+"...ch"/"...ls" for Search/Models — inconsistent cut positions ruled out
+simple text truncation), Settings' own category sidebar clipped the
+same way, AND action buttons clipped on the right ("Check for Upda[te]",
+"Emai[l]", "eaon.[dev]"). Both edges cut, not one — pointed at something
+wider than the window overflowing symmetrically, not a truncation bug.
+
+**Root cause, found in code, not guessed from the screenshot:**
+`SettingsRootView`'s floating card was a bare `.frame(width: 980, height:
+700)` — completely fixed, no responsiveness at all. `App.swift`'s
+`WindowGroup` only enforces `minWidth: 800, minHeight: 600`. A window
+sitting anywhere near that real, enforced minimum is narrower AND
+shorter than the card's hardcoded size, so the card overflows both
+edges (and top/bottom) when centered in its ZStack — content past the
+window boundary is invisible, not scrolled or wrapped. Swept every
+other fixed-width overlay/dialog in the app (`grep` for any
+`.frame(width: N)` ≥ 500pt) to check for the same bug elsewhere —
+Onboarding (560), SearchPalette (560), LocalBackendsInstallSheet (560),
+one Dialogs.swift sheet (520) — all comfortably under 800−24, so
+`SettingsRootView` was the sole offender, not a systemic pattern.
+
+**Fixed:** wrapped `SettingsRootView.body` in a `GeometryReader`,
+applying `.frame(width: min(980, geo.size.width - 24), height: min(700,
+geo.size.height - 24))` to the card from the OUTSIDE instead of the
+card's own hard-coded frame (removed). 980×700 is now a ceiling, not a
+fixed value — identical appearance on any window actually big enough
+for it, shrinks to fit with a 24pt margin on anything smaller instead
+of silently overflowing. The card's internal 230pt category sidebar
+stays fixed (plenty of room left even at the 800pt floor); its content
+pane already used `.frame(maxWidth: .infinity, maxHeight: .infinity)`,
+so it absorbs whatever width remains once the outer frame shrinks.
+
+Deliberately did NOT raise the window's own minWidth/minHeight instead
+— the user's ask was to make the app work AT their current size, not
+tell them to make their window bigger. Also deliberately did NOT apply
+the same GeometryReader-clamp defensively to the other already-safe
+overlays (560/520pt, nowhere near the 800pt floor) — would be a no-op
+in every real case, pure speculative churn.
+
+`swift build` clean; relaunched (PID 297). Not seen live: actually
+reproducing the narrow window and confirming the card now fits with
+margin on both sides instead of clipping. Nothing committed.
+
+## Update — 2026-07-15 (later): concurrent generation — new chats no longer cancel another one's reply
+
+Ask: start a new chat and talk to another model while a reply is still
+coming in elsewhere, without interrupting it. Investigated before
+touching anything — this was NOT "unsupported," it was actively broken
+two different ways, found by reading the real pipeline, not guessed:
+
+1. **`startSend()` unconditionally cancelled the single shared
+   `generationTask`** before starting a new one — literally cancelling
+   whatever conversation was still generating the instant you sent a
+   message anywhere else.
+2. Even without that: `messages`, `isGenerating`, `activeTypingMessageId`,
+   `loadingStatusText`, `agentActivityText`, `typewriter`, and all three
+   `pendingXConfirmation` fields were single scalars on `ChatViewModel`,
+   implicitly meaning "whichever conversation is on screen." Switching
+   conversations swapped out `messages` from under a still-running
+   generation — its `setAssistantMessageContent`/`finalizeGeneration`
+   calls would silently no-op forever after (the message id they look
+   for isn't in the new array), so the old reply would just freeze with
+   no error, mid-sentence, the moment you navigated away. Confirmation
+   dialogs had the same problem: a second conversation's confirmation
+   request would silently orphan the first one's `CheckedContinuation`
+   forever (never resumed), permanently hanging that conversation's
+   agent loop.
+
+**Fix — per-conversation generation sessions**, not a global rewrite:
+- New `GenerationSession` (`@Observable`, nested in `ChatViewModel`,
+  `fileprivate` — a `private` nested type broke `@Observable`'s macro
+  expansion, "inaccessible due to private protection level") holds one
+  generation's task, typewriter, activeTypingMessageId,
+  loadingStatusText, agentActivityText, and all three pending-confirmation
+  fields + their continuations. `sessions: [UUID: GenerationSession]`
+  keyed by conversation id.
+- `isGenerating`, `activeTypingMessageId`, `loadingStatusText`,
+  `agentActivityText`, `pendingRunConfirmation`,
+  `pendingMCPCallConfirmation`, `pendingDesktopCallConfirmation` are now
+  COMPUTED, reading `sessions[currentConversationId]` — every existing
+  UI call site (composer, message rows, RootView's confirmation dialogs)
+  needed ZERO changes, since "for the visible conversation" is now baked
+  into the computed property itself instead of being true by accident.
+- New `withMessages(for:_:)`/`persistGeneration(for:)` — the generation
+  pipeline's own message-array/save helpers, correct whether or not the
+  target conversation is still visible (write to live `messages` if so,
+  directly into `conversations[index].messages` if not). Threaded a
+  captured `conversationId: UUID` (guaranteed real — `saveMessages()`
+  already creates it synchronously before any `await`) through
+  `sendMessage → streamOneAgentStep → executeAgentTools →
+  streamCustomCompletion/streamLocalCompletion/streamCompletion →
+  setAssistantMessageContent/finalizeGeneration/markError`, replacing
+  every direct `messages`/`isGenerating`/etc. touch along the way.
+- Also caught and fixed the same class of bug for `selectedModel`: it's
+  the model PICKER's live selection, which the user is free to change
+  the instant they switch conversations — reading it fresh at each step
+  of what can be a 40-step agent loop would've silently sent a
+  DIFFERENT conversation's chosen model mid-generation. Captured
+  `modelId` once alongside `conversationId`, threaded the same way.
+- `startSend()` no longer cancels anything by default (the old
+  unconditional cancel was the actual reported bug); `stopGeneration()`
+  targets only the visible conversation's own session.
+- Sidebar: new small pulsing dot (`SidebarGeneratingDot`) on any
+  conversation still generating in the background, via
+  `isGeneratingInBackground(_:)` — confirms the other one really is
+  still working instead of leaving that invisible.
+
+**Verified two ways**, given this is real concurrency/data-integrity
+work I can't click-test myself:
+1. Compiler-driven completeness: converted the scalars to computed
+   properties FIRST, then fixed every resulting "cannot assign to
+   get-only property" error one at a time — guarantees no stale direct
+   write was missed anywhere in the file (grepped afterward to confirm
+   zero remain).
+2. A standalone harness reproducing `withMessages`/`persistGeneration`/
+   `GenerationSession` verbatim (same control flow, same names) against
+   the actual reported scenario: generate in conversation A, switch to a
+   brand-new chat mid-stream (exactly `startNewChat()`'s real effect),
+   generate in B, then confirm — A's FULL reply survived correctly in
+   its own storage (not cut off), B's data is completely independent,
+   no cross-contamination either direction. Also tested switching to a
+   different EXISTING conversation (not just a new one) mid-generation.
+   11/11 pass. Deleted after.
+
+`swift build` clean (real full-app rebuild, all views compiled against
+the new signatures with zero call-site changes needed outside
+`ChatViewModel.swift`/`SidebarView.swift`); relaunched (PID 7829). NOT
+seen live: the actual GUI experience of starting a new chat while
+another streams, the sidebar dot's appearance/timing, and — real,
+worth flagging — whatever LOCAL backend serves both models (if the same
+Ollama/llama.cpp instance is asked to serve two conversations at once)
+may itself only handle one request at a time; that's the backend's own
+capacity, not something fixable in this client. Nothing committed.
+
+## Update — 2026-07-15 (later): Windows version — started a cross-platform Tauri rebuild
+
+Ask: "make a Windows version, working and running smoothly." Led with
+the honest verdict first (per user's directness preference), backed by
+real numbers from surveying the codebase: this is NOT a port, it's a
+ground-up rebuild. SwiftUI does not exist on Windows — 16,744 lines
+across 44 View files, plus 32 of 98 files touching macOS-only APIs
+(AppKit/WebKit/NSPasteboard/NSEvent/AppleScript/Homebrew/`~/Library`),
+would all be rewritten. MLX (one of the 3 local backends) is
+Apple-Silicon-only and literally can't run on Windows. Only the design
+and the backend HTTP protocols survive.
+
+Surfaced the strategic point: **Jan.ai (the target to beat) is Tauri**,
+cross-platform by design; Eaon's native SwiftUI is exactly what locks it
+to Mac. Asked the user to pick the stack (genuine fork, zero shared code,
+positioning per-memory undecided). They chose **Tauri** (recommended).
+
+**Built a real, running foundation** in `eaon-tauri/` (new dir in this
+repo, gitignores exclude target/node_modules/build):
+- Installed Rust via rustup (was missing; Node 22 was already present).
+- Scaffolded Tauri v2 + Svelte 5 (SvelteKit static/SPA, `ssr=false`).
+- Rust core (`src-tauri/src/lib.rs`): `chat_stream` (async command,
+  streams over a `tauri::ipc::Channel`, POSTs OpenAI-compatible
+  `/v1/chat/completions` with SSE, parses `delta.content` + reasoning)
+  and `list_ollama_models` (`/api/tags`). ALL http is in Rust, not the
+  webview → tighter CSP, and one path already covers local Ollama + the
+  hosted API + any BYOK (base URL + key). reqwest with **rustls-tls**
+  (not OpenSSL) specifically so the Windows build needs no C toolchain.
+- Svelte chat UI: model picker, live streaming, "Thinking" disclosure
+  for reasoning models, real in-band errors, dark Eaon-styled theme,
+  window drag region. Product name/identifier set to Eaon/dev.eaon.desktop.
+
+**Verified (real, not claimed):**
+- `cargo build` — whole app compiles + links, ~400 crates, 32s.
+- `npm run build` — frontend builds clean (tiny output; the Tauri win).
+- `npm run tauri dev` — app BOOTS and RUNS: vite served 200 on :1420,
+  `target/debug/eaon-tauri` process live, clean startup log. (Launched
+  in background, verified, then killed so no stray window is left.)
+- `cargo run --example stream_smoke` — the EXACT reqwest+rustls+SSE loop
+  the command uses, run against live Ollama (deepseek-r1:7b), streamed
+  real tokens, assembled "Streaming works." → SMOKE PASS.
+
+**Honestly NOT verified — stated plainly to the user and in the README:**
+the Windows `.exe`/`.msi` build itself. Everything verified above ran on
+THIS Mac (Tauri runs on all 3 desktop OSes, so that proves the code).
+The code is cross-platform BY CONSTRUCTION (rustls not OpenSSL, zero
+macOS-only APIs in the Rust, Tauri auto-uses WebView2 on Windows), but
+producing + smoke-testing the actual Windows binary must happen on a
+Windows machine or a `windows-latest` CI runner — it cannot be
+cross-compiled-and-run from macOS. That's the documented immediate next
+step (README roadmap item #1: a GitHub Actions Windows build).
+
+This is a FOUNDATION, not feature-parity with the Mac app — it does
+local-Ollama streaming chat well and is architected to grow. Roadmap to
+parity is in `eaon-tauri/README.md`. Rust toolchain now installed at
+`~/.cargo` (rustup). Nothing committed.
+
+## Update — 2026-07-15 (later): Windows UI made 1:1 with the Mac app
+
+Ask: make the Windows/Tauri UI a faithful 1:1 of the Mac SwiftUI UI, not
+a cheap ripoff. Approach: extracted the REAL design tokens from the Mac
+source rather than eyeballing —
+- `ThemeColors.swift` `.dark` palette → CSS variables verbatim in
+  `eaon-tauri/src/app.css` (stage #171717, sidebar #101010, elevated/
+  input #242424, inputSecondary #2E2E2E, textPrimary #ECECEC, secondary
+  #B4B4B4, tertiary #8E8E9C, borders white .10/.16, userBubble #242424,
+  destructive #FF6467, accent #F17455, etc.).
+- Fonts: copied the actual bundled **IBM Plex Mono + Sans** .ttf files
+  (all 4 weights each) from `Eaon-desktop/Resources/Fonts` into
+  `eaon-tauri/static/fonts` (+ the OFL license file) and @font-face'd
+  them — the same typefaces AppFonts.swift registers, not lookalikes.
+- Layout tokens read straight from RootView/SidebarView/ChatHomeView/
+  ChatComposer: floating sidebar card (240px, radius 16, inset padding
+  10/6/9/9, border-subtle, shadow), 50px header bands, nav rows (mono 14,
+  icon+label, ⌘-hints, radius-9 hover/selected), the composer pill
+  (radius 26, bg-input, plus-button 34px circle bg-inputSecondary, the
+  Chat/Agent/Eaon Claw mode segmented control, send button 36px circle
+  filled textPrimary→dark-arrow, destructive+stop while streaming),
+  message layout (user bubble right-aligned #242424 radius-12, assistant
+  plain body left with model-attribution header + accent dot + "Thinking"
+  disclosure), the "What can I help with?" mono-34-bold hero, composer
+  centered when empty / docked at bottom with the disclaimer when active.
+
+New files: `src/app.css`, `src/routes/+layout.svelte` (loads it),
+`src/lib/Icon.svelte` (hand-drawn SVGs matching the SF Symbols used),
+rewrote `src/routes/+page.svelte` into the full shell (sidebar + chat +
+composer) while KEEPING the working Ollama streaming. Added in-memory
+conversations (New Chat, sidebar list, title-from-first-message,
+centered→docked composer) so the sidebar is real, not decorative —
+persistence across launches is still a roadmap item.
+
+**Verified visually, not just compiled:** `npm run build` clean, then
+served the frontend and screenshotted it in a browser (the layout/fonts/
+colors render identically; only Tauri `invoke` differs). Confirmed the
+empty state AND a seeded conversation view both match the Mac app's
+design language — fonts, palette, sidebar card, composer pill, message
+bubbles, attribution header, Thinking disclosure all faithful. (The
+browser preview shows a red `invoke` error because a plain browser has
+no Tauri runtime — that's a preview artifact; the real app connects to
+Ollama, proven by the earlier stream_smoke PASS.) Reverted the temporary
+demo seed after; dev servers stopped.
+
+Known follow-ups (documented, not bugs): ⌘ shortcut hints should become
+Ctrl on Windows; window is still standard-decorated (frameless + custom
+title-bar controls would complete the seamless look); Projects/Search/
+Models/Settings/attachments/Agent/Claw are visually present but show a
+"coming to the Windows version soon" notice — only Chat is wired.
+Nothing committed.
+
+## Update — 2026-07-15 (later): Windows app rebuilt FULLY — 1:1 UI with real features
+
+Ask escalated: not just the chat surface — scrap the minimal version and
+rebuild the whole Windows frontend 1:1 with the Mac app, same features.
+Done solo (ultracode was toggled off mid-turn; no workflow orchestration).
+Every component was ported from the actual Swift source (read
+ModelPickerPopover/SearchPaletteView/ProjectsView/AquaSupportedModels
+fully this turn, on top of everything read earlier in the session).
+
+**Rust core expanded** (`src-tauri/src/lib.rs`, 8 commands): cancellable
+`chat_stream` (per-request AtomicBool flags — the stop button REALLY
+aborts now), `cancel_stream`, `ollama_tags` (detailed: size/params/
+quant), `ollama_pull` (NDJSON progress → Channel), `ollama_delete`
+(VERIFIED deletion — re-checks tags, Mac parity), `fetch_provider_models`
+(OpenAI-shape /models for Aqua+BYOK), `load_app_state`/`save_app_state`
+(one JSON blob in app_data_dir, atomic temp+rename writes). Frameless
+window (`decorations:false`) + window-control capabilities.
+
+**Frontend rebuilt** (src/lib): state.svelte.ts is the ChatViewModel
+equivalent — per-conversation generation sessions (background chats keep
+streaming, sidebar pulse dot, unread dots — the Mac concurrency model),
+provider-merged catalog (Aqua allowlist port + BYOK configs + Ollama),
+debounced persistence, appearance side-effects. markdown.ts + highlight.ts
+are line-faithful TS ports of MarkdownLineParser/MessageContentParser/
+ReasoningExtractor/SyntaxHighlighter. brand.ts + the actual BrandLogos
+assets (58 files) + CuratedOllamaModels.json copied verbatim.
+Components (each names the Swift view it ports): Sidebar (nav rows with
+mod-key hints, Pinned, expandable Projects, date buckets, hover ellipsis
+menus), ModelPicker (capsule + 340×480 popover: search/Favorites/"On this
+PC"/provider groups with gear), ChatHome (topbar/empty states per mode/
+docked composer + disclaimer), Messages (attribution header, Thinking
+disclosure, markdown+code, hover copy/thumbs/regenerate, tok/s caption,
+scroll-follow + jump-to-bottom), Composer (radius-26 pill, growing
+textarea, mode switcher, send/stop), SearchPalette (mod+K, flat
+keyboard-navigable list incl. model/theme switching), SettingsModal
+(230px category sidebar + BETA pills + MODEL PROVIDERS/LOCAL sections;
+working pages: General/Instructions/Appearance(theme/accent/font/toggles)/
+Shortcuts/Privacy/Statistics/Hardware/Aqua key/BYOK editor/Ollama mgmt;
+honest coming-soon pages for Memory/Plugins/Skills/ImageProviders/Claw/
+LocalAPIServer), ModelsPage (curated categories from the real JSON,
+custom pull row, live progress bars, installed section, verified delete),
+ProjectsPage (grid + detail), Dialogs (confirm/rename/new-project/
+delete-model), WindowControls (custom min/max/close, hidden when no
+Tauri runtime so browser previews work). Both themes (exact
+ThemeColors.light too), 14 accent colors, 3 font sizes.
+
+**Verified**: cargo build clean; npm run build clean (one nested-button
+invalid-HTML error found and fixed — menu buttons became absolutely-
+positioned siblings, the ZStack-overlay equivalent); then DROVE the real
+UI in a browser and screenshot-verified: empty state, Models page (real
+catalog + logos + NEW badges), Settings General + Appearance, LIGHT THEME
+(whole app switches correctly), search palette. Real Tauri app launched
+and left running (PID 17594). NOT verified by me: clicking inside the
+native window (can't drive it) — the user should send a real message;
+and the Windows binary itself still needs a windows-latest CI build
+(unchanged roadmap item #1).
+
+Old minimal-UI files scrapped (src/lib/Icon.svelte, template SVGs);
+README status section rewritten. Nothing committed.
+
+## Update — 2026-07-15 (later still): real icons — Lucide instead of hand-drawn SVGs
+
+Ask: "use the same icons" as the Mac app. Real answer up front: can't
+literally reuse them — the Mac app draws every icon via SF Symbols, which
+is an Apple system framework proprietary to Apple platforms (rendered by
+the OS from a symbol name, not shipped as portable asset files), so it
+can't be bundled into a Windows build. Said so directly rather than
+quietly reusing the old hand-drawn approximation.
+
+Fix: swapped the hand-drawn `Icon.svelte` palette for **`@lucide/svelte`**
+(ISC licensed, `svelte: ^5` peer dep — matches this project exactly).
+Grepped the *entire* Mac Swift source for every `systemName:` in use (58
+distinct SF Symbols) and cross-referenced every name already in
+`Icon.svelte`'s palette (63, since a few are Windows-chrome-only or
+invented outline variants) against Lucide's real installed export list —
+verified by reading `node_modules/@lucide/svelte/dist/icons/index.js`
+directly rather than guessing PascalCase names, since Lucide has renamed/
+deprecated a bunch (`bar-chart`→`ChartBar`, `sidebar`→`PanelLeft`,
+`sliders`→`SlidersHorizontal`, `CheckCircle`→`CircleCheckBig`, etc. — the
+old names still resolve as `.js`-only aliases with no matching `.svelte`
+file, i.e. not real Svelte components).
+
+Kept the exact same `<Icon name="..." size={} stroke={} />` call-site API
+so none of the ~15 components using it needed to change — only the
+internals swapped to a `name → component` lookup rendered as
+`<Cmp size strokeWidth={stroke} fill={...} />` (Svelte 5: dynamic
+components render directly, no `<svelte:component>` needed — that
+triggered a deprecation warning in runes mode, fixed by dropping it).
+
+One real gotcha caught before it shipped: the Lucide primitive destructures
+a prop named `strokeWidth` (camelCase) — passing `stroke-width={stroke}`
+(kebab-case, what you'd instinctively write) silently lands in `...props`
+and gets spread onto the root `<svg>` *before* the component's own
+explicit `stroke-width={calculatedStrokeWidth}` attribute, which wins and
+silently overrides it back to Lucide's default of 2. Caught by reading the
+actual `Icon.svelte` primitive source instead of assuming the prop name.
+
+SF Symbols' two-tone `.fill` rendering (solid shape + a same-color detail
+punched out in the background color, e.g. `checkmark.circle.fill`,
+`exclamationmark.triangle.fill`) has no Lucide equivalent — Lucide is a
+single-tone stroke set. Forcing `fill="currentColor"` on those compound
+multi-path icons would make the inner detail (same `currentColor` stroke)
+disappear into the now-solid shape. Fixed by only filling genuinely
+single-path silhouettes (folder, star, bolt/zap, the stop square, the gear,
+the brand droplet) and leaving compound icons (warning triangle, success
+checkmark) as clean outlines — verified this was the right call by
+screenshotting the actual "Ollama isn't running" warning banner, which
+reads perfectly clear as an outlined triangle-with-exclamation-mark.
+
+Verified: `npm run build` and `npm run check` both clean (0 errors, only
+the pre-existing unrelated Switch.svelte a11y warning). Screenshotted the
+live app (sidebar nav, full Settings category list, Models page + warning
+banner, composer) — every sampled icon renders crisp with no console
+errors. Nothing committed.
+
+## Update — 2026-07-15 (later still): Skills ported + Windows release CI (macOS untouched)
+
+Two threads this turn. (1) Started "make the API server and skills work" on
+Windows. (2) User interrupted mid-way and pivoted to distribution CI, with an
+emphatic "only Windows, do not touch the macOS version." Handled both.
+
+**Skills — fully ported (backend + invocation).** New `src/lib/skills.ts` is a
+line-faithful port of `Skill.swift`/`StarterSkills.swift`: SKILL.md frontmatter
+parser, `normalizeSkillName` slugify, GitHub `candidateRawURLs` (blob/tree/bare-
+repo → raw URLs), and the 3 real starter skills verbatim. `types.ts` gained
+`Skill`/`SkillSource` + `invokedSkillName` on ChatMessage. `state.svelte.ts`
+gained the SkillStore equivalent: `sortedSkills`/`enabledSkills`/`skillNamed`,
+toggle/remove/addManual/addFromGitHub/localClaudeSkillCandidates/importLocal,
+starter-seed-on-first-load, and `/name` invocation wired into `send()` (extracts
+a leading /skill, injects its instructions as the last system turn before the
+user msg, tags the user message). Two new Rust commands back the I/O the
+webview CSP blocks: `fetch_text_url` (GitHub SKILL.md fetch) and
+`scan_claude_skills` (reads ~/.claude/skills/ via `home_dir()` — cross-platform,
+works at C:\Users\<you>\.claude\skills on Windows). Skills invocation works
+now; the Skills *UI* (settings page, add sheets, composer autocomplete, message
+badge) is NOT built yet — pending.
+
+**Local API Server — PARKED half-built.** Had added axum/tokio deps + a state
+skeleton (settings fields persist: enabled/port/requireKey/apiKey + runtime
+running/error/recentRequests) but not the axum listener or UI. The interrupt
+came before wiring, leaving `state.svelte.ts` calling an undefined
+`applyLocalServerSettings()` → frontend wouldn't build. Parked cleanly: removed
+the dangling call (left a NOTE + the harmless settings fields), reverted the
+unused axum/tokio deps from Cargo.toml so the first CI build stays lean. Tree is
+green again — `npm run check`/`build` 0 errors, `cargo check` clean.
+
+**Windows release CI — the actual deliverable.** New
+`.github/workflows/release.yml`: Tauri v2, **windows-latest only**, triggered by
+a `v*` tag. checkout → node20+npm ci (cache-dependency-path eaon-tauri) → rust
+stable + Swatinem/rust-cache (workspaces eaon-tauri/src-tauri) → version-sync
+from tag (v2026.2.0 → tauri.conf.json 2026.2.0 via node one-liner) →
+tauri-apps/tauri-action@v0 with `projectPath: eaon-tauri`, publishing a DRAFT
+GitHub Release (contents:write permission set) with .exe(NSIS)+.msi and a
+SmartScreen "More info → Run anyway" note in the body. A `workflow_dispatch`
+path builds installer-only and uploads it as a run artifact (test-the-build
+without releasing). YAML validated (parses, 9 steps). All 5 config icons incl.
+icon.ico confirmed present so the bundle won't fail on assets.
+
+New `eaon-tauri/RELEASING.md`: cut-a-release steps, the manual test path, the
+unsigned-install/SmartScreen guidance for end users, future code-signing note,
+and confirmation that ZERO cross-platform path/structural changes were needed
+(app already uses app_data_dir/home_dir/PathBuf::join + rustls, no macOS-only
+APIs). Framework placeholder in the user's prompt resolved to Tauri (what the
+app already is).
+
+Verified I touched nothing under Eaon-desktop/ this turn (find -mmin: 0 macOS
+files). eaon-tauri/ is still entirely untracked — RELEASING.md flags that it
+must be committed before a tag push, and .gitignore already excludes
+node_modules//build//target/.svelte-kit (git add -n: 0 heavy-dir files).
+Nothing committed. STILL OPEN: Skills UI, and finishing the parked Local API
+Server (Rust axum listener + settings UI).
+
+---
+
+# ═══ SESSION-END HANDOFF — 2026-07-15 ═══
+# (Windows / Tauri cross-platform effort. Read this block first to resume.)
+
+## The goal we're working toward
+
+**Ship a Windows version of Eaon that is 1:1 with the native macOS app, and
+distribute it as a `.exe`.** Eaon's flagship is the native macOS SwiftUI app
+(`Eaon-desktop/`, built with Xcode). SwiftUI can't run on Windows, so the
+Windows app is a **ground-up Tauri v2 rebuild** (`eaon-tauri/` — Rust core +
+Svelte 5 UI) that reproduces the Mac app screen-for-screen and feature-for-
+feature. This is the same tech path Jan.ai (the app we're chasing) uses for
+cross-platform reach. **Hard constraint from the user: do NOT touch the macOS
+app — Windows only.**
+
+Concretely, the open sub-goals are: (1) reach feature parity with the Mac app
+on Windows, (2) make Skills and the Local API Server actually work on Windows,
+(3) produce and test a real Windows `.exe` via CI (the user is on a Mac and
+can't build/run Windows locally).
+
+## Current state of the code
+
+- **`eaon-tauri/` builds and runs clean.** `npm run build`, `npm run check`,
+  and `cargo check` are all green (only one pre-existing, unrelated a11y
+  warning on `Switch.svelte`). This session I launched `npm run tauri dev` on
+  the Mac and it **compiled in 3.4s and opened the native window** — the
+  Windows codebase runs. (It renders in a Mac window via WKWebView; on Windows
+  it's the same code via WebView2.)
+- **Icons — DONE.** Swapped the hand-drawn SVG set for **`@lucide/svelte`**
+  (ISC license; a real dependency in package.json). All 63 icon names mapped
+  1:1 by meaning against the Mac app's SF Symbols. Verified in the live app.
+- **Skills — BACKEND DONE, UI NOT BUILT.** `/skill-name` invocation works end
+  to end (parse → seed starters → resolve → inject instructions as the last
+  system turn → tag the user message). What's missing is the *visible* UI:
+  the Skills settings page, the 3 add-sheets (GitHub / Claude-Code import /
+  manual), the composer `/` autocomplete popover, and the "Skill: name" badge
+  above user messages.
+- **Local API Server — PARKED, HALF-BUILT.** Settings + state fields exist and
+  persist (enabled / port / requireKey / apiKey + runtime running/error/
+  recentRequests), but there is **no Rust listener and no UI**. The Rust axum
+  server and the settings page are both still to build. It's parked in a
+  non-breaking state (see failures below).
+- **Windows release CI — DONE, NOT YET RUN.** `.github/workflows/release.yml`
+  (Tauri, windows-latest only, `v*`-tag-triggered, draft GitHub Release with
+  `.exe`+`.msi`) and `eaon-tauri/RELEASING.md` are written and validated. It
+  has never executed because `eaon-tauri/` isn't committed yet.
+- **Git: nothing committed this entire session.** `eaon-tauri/` is *entirely
+  untracked*. There are also pre-existing uncommitted changes under
+  `Eaon-desktop/` from earlier work — **I did not touch those this session**
+  and they are not mine to commit. `.gitignore` correctly excludes
+  node_modules//build//target/.svelte-kit (verified: `git add -n` stages 0
+  heavy-dir files).
+
+## Files actively being edited (all Windows-side; macOS untouched)
+
+Changed/created this session, under `eaon-tauri/` and `.github/`:
+- `eaon-tauri/src/lib/components/Icon.svelte` — now renders Lucide components.
+- `eaon-tauri/src/lib/skills.ts` — NEW. SKILL.md parser, GitHub URL resolver,
+  3 starter skills (port of Skill.swift + StarterSkills.swift).
+- `eaon-tauri/src/lib/types.ts` — added Skill/SkillSource, invokedSkillName,
+  and the localServer* settings fields.
+- `eaon-tauri/src/lib/state.svelte.ts` — Skills store methods + `/name`
+  invocation in `send()`; localServer settings/state fields; starter-seed on
+  load. (Has the parked Local-API-Server NOTE where the listener will hook in.)
+- `eaon-tauri/src/lib/api.ts` — added `fetchTextUrl` + `scanClaudeSkills`
+  wrappers.
+- `eaon-tauri/src-tauri/src/lib.rs` — added `fetch_text_url` and
+  `scan_claude_skills` commands (both registered in the handler list).
+- `eaon-tauri/src-tauri/Cargo.toml` — reverted to clean (the axum/tokio deps I
+  briefly added for the parked server were removed).
+- `eaon-tauri/package.json` — added `@lucide/svelte` dependency.
+- `.github/workflows/release.yml` — NEW. Windows release pipeline.
+- `eaon-tauri/RELEASING.md` — NEW. Release + unsigned-distribution docs.
+- `handoff.md` — this file.
+
+## Everything tried that failed (and the fix / status)
+
+- **"Run the Windows .exe on the Mac" — not possible.** A Windows binary needs
+  a real Windows machine or VM (or the CI build downloaded onto one); macOS
+  can't execute it and there's no emulator here. The runnable substitute is
+  `npm run tauri dev`, which runs the identical Windows codebase as a Mac
+  window. (This is exactly why the CI matters — it's the only way to produce a
+  testable `.exe` from a Mac.)
+- **Can't literally reuse the Mac app's icons.** SF Symbols are an Apple system
+  framework, proprietary to Apple platforms and not redistributable into a
+  Windows build. → Used Lucide (closest permissive stroke set) mapped 1:1.
+- **Lucide gotchas that bit / would have bitten:** (a) deprecated icon names
+  (`bar-chart`, `sidebar`, `sliders`, `CheckCircle`…) are `.js`-only aliases
+  with **no `.svelte` component** — had to verify real exports against the
+  installed package, not guess. (b) the prop is camelCase `strokeWidth`;
+  passing kebab `stroke-width` is silently overridden back to Lucide's default
+  of 2. (c) SF Symbols' two-tone `.fill` has no Lucide equivalent, so compound
+  icons (warning triangle, success check) are kept as outlines, not force-
+  filled (a fill would swallow the inner detail).
+- **`<svelte:component>` is deprecated in Svelte 5 runes mode** → render the
+  dynamic component directly as `<Cmp .../>`.
+- **Parking the Local API Server broke the build.** The half-written state
+  called an undefined `applyLocalServerSettings()`, so `npm run build` failed
+  (which would fail CI too). → Removed the dangling call (left a NOTE + the
+  harmless persisted settings fields) and reverted the unused axum/tokio deps
+  so the first CI build stays lean. Tree green again.
+- **(Earlier this session, for context)** nested `<button>` invalid-HTML in
+  Sidebar.svelte, and a module-init `getCurrentWindow()` crash blanking the
+  browser preview — both already fixed earlier.
+
+## How to resume (next steps, in priority order)
+
+1. **Commit `eaon-tauri/` + `.github/workflows/release.yml`**, then push a
+   `v<version>` tag (e.g. `v2026.2.0`) to trigger the Windows CI and get a real
+   `.exe`. This is the fastest way to actually test the Windows build. (Only
+   commit when the user asks — they've kept everything uncommitted on purpose.)
+2. **Finish the Local API Server** (Rust axum loopback listener + the settings
+   page). Mirror `LocalAPIServer.swift`/`LocalAPIServerStore.swift`/
+   `LocalAPIServerSettingsView.swift`. The frontend state/settings are already
+   in place waiting for it.
+3. **Build the Skills UI** (settings page, 3 add-sheets, composer `/`
+   autocomplete, message badge). Backend is done; this is pure UI.
+4. Later: code-sign the Windows build to drop the SmartScreen warning
+   (see RELEASING.md).

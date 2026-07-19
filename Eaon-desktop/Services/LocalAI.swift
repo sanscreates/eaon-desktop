@@ -153,6 +153,90 @@ enum GPUOffloadMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// The context window (`-c`) a llama.cpp model is launched with. This is the
+/// single biggest speed/memory lever for local models: llama-server's own
+/// default is the model's *entire trained* context (128K–256K for modern
+/// models), which allocates a multi-gigabyte KV cache — measured live, a
+/// 0.5 GB model pulled a 3 GB KV cache at its 256K default, which swaps to
+/// disk and crawls on a RAM-constrained Mac. Every option here is far
+/// smaller; `.balanced` (8192) is the default and already roomier than
+/// Ollama's own 4096.
+enum LlamaContextSize: String, Codable, CaseIterable, Identifiable {
+    case compact
+    case balanced
+    case large
+    case huge
+
+    var id: String { rawValue }
+
+    /// The number handed to `-c`.
+    var tokens: Int {
+        switch self {
+        case .compact: return 4096
+        case .balanced: return 8192
+        case .large: return 16384
+        case .huge: return 32768
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .compact: return "Compact · 4K"
+        case .balanced: return "Balanced · 8K"
+        case .large: return "Large · 16K"
+        case .huge: return "Huge · 32K"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .compact: return "Smallest memory use and fastest to load — enough for short back-and-forth chats."
+        case .balanced: return "The recommended default — roomy for normal conversations without a heavy memory cost."
+        case .large: return "More room for longer chats or pasting in documents. Uses noticeably more memory."
+        case .huge: return "For feeding in large documents. Uses a lot of memory — only worth it if you have RAM to spare."
+        }
+    }
+
+    static let defaultValue: LlamaContextSize = .balanced
+}
+
+/// Whether to force llama.cpp's Flash Attention on or off. llama-server's own
+/// default is `auto` (it decides per-model), which `.auto` here preserves by
+/// omitting the flag. Exposed because forcing it `on` can speed up
+/// generation and shrink the KV cache on models where `auto` leaves it off.
+enum FlashAttentionMode: String, Codable, CaseIterable, Identifiable {
+    case auto
+    case on
+    case off
+
+    var id: String { rawValue }
+
+    /// The `-fa` value, or nil to omit the flag (keep llama-server's default).
+    var argument: String? {
+        switch self {
+        case .auto: return nil
+        case .on: return "on"
+        case .off: return "off"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .on: return "On"
+        case .off: return "Off"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .auto: return "Let llama.cpp decide — the safe default."
+        case .on: return "Force it on — often faster and lighter on memory, if the model supports it."
+        case .off: return "Force it off — only if a model misbehaves with it on."
+        }
+    }
+}
+
 // MARK: - Model record
 
 /// One locally-runnable model. `id` is namespaced ("ollama:llama3.2:latest")
@@ -197,6 +281,21 @@ struct LocalModelRecord: Identifiable, Codable, Equatable {
     /// who's never touched the control — decode-safe for the same reason as
     /// every other optional added here after records already existed.
     var gpuMode: GPUOffloadMode?
+    /// User override for the context window (`-c`), llama.cpp-only. Nil means
+    /// `LlamaContextSize.defaultValue` (8192) — decode-safe on older records.
+    var contextSize: LlamaContextSize?
+    /// User override for Flash Attention (`-fa`), llama.cpp-only. Nil means
+    /// `.auto` (omit the flag) — decode-safe on older records.
+    var flashAttention: FlashAttentionMode?
+    /// True for an Ollama model whose real `/api/tags` `capabilities`
+    /// includes `"thinking"` — the real, structured signal (not a name
+    /// guess) for whether the composer's Thinking toggle can actually do
+    /// anything for this model. Verified live: Ollama's OpenAI-compatible
+    /// `/v1/chat/completions` endpoint DOES forward a top-level `"think"`
+    /// field through to the model for these — `think: false` measurably
+    /// shortened a real DeepSeek/Nemotron reasoning trace, not a no-op.
+    /// Optional/decode-safe for records saved before this field existed.
+    var supportsThinkingToggle: Bool?
 }
 
 // MARK: - Curated catalog (data-driven)
@@ -472,7 +571,8 @@ final class LocalAIManager {
                     quantization: nonEmpty(model.details?.quantization_level),
                     family: nonEmpty(model.details?.family),
                     contextLength: model.details?.context_length,
-                    isImageGeneration: model.capabilities?.contains("image") == true
+                    isImageGeneration: model.capabilities?.contains("image") == true,
+                    supportsThinkingToggle: model.capabilities?.contains("thinking") == true
                 )
             }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
@@ -509,6 +609,42 @@ final class LocalAIManager {
               let sizeVRAM = match["size_vram"] as? NSNumber else { return nil }
         let contextLength = (match["context_length"] as? NSNumber)?.intValue
         return OllamaModelStatus(sizeVRAMBytes: sizeVRAM.int64Value, contextLength: contextLength)
+    }
+
+    /// Everything currently resident in Ollama's memory, keyed by request
+    /// model id with its real byte footprint — what the per-model "in
+    /// memory" badges and eject buttons in Settings read, refreshed in one
+    /// `/api/ps` call instead of every row firing its own.
+    private(set) var loadedOllamaModels: [String: Int64] = [:]
+
+    func refreshLoadedOllamaModels() async {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:11434/api/ps")!)
+        request.timeoutInterval = 3
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = json["models"] as? [[String: Any]] else {
+            loadedOllamaModels = [:]
+            return
+        }
+        var loaded: [String: Int64] = [:]
+        for model in models {
+            guard let name = model["name"] as? String,
+                  let size = model["size_vram"] as? NSNumber else { continue }
+            loaded[name] = size.int64Value
+        }
+        loadedOllamaModels = loaded
+    }
+
+    /// Immediately evicts a model from Ollama's memory — `keep_alive: 0`
+    /// on the same native ping `primeOllamaModel` uses, which is Ollama's
+    /// own documented unload (verified live on this Mac: the call returns
+    /// `done_reason: "unload"` and `/api/ps` empties immediately). Weights
+    /// on disk are untouched; the next message to this model just
+    /// cold-loads it again.
+    func unloadOllamaModel(_ modelId: String) async {
+        await primeOllamaModel(modelId, keepAlive: "0")
+        await refreshLoadedOllamaModels()
     }
 
     private static func formatBytes(_ bytes: Int64?) -> String {
@@ -1345,8 +1481,28 @@ final class LocalAIManager {
     /// new `-ngl` value instead of silently continuing to run under the
     /// old one until the app restarts.
     func setGPUMode(_ mode: GPUOffloadMode, for id: String) {
+        updateLlamaSetting(for: id) { $0.gpuMode = mode }
+    }
+
+    /// llama.cpp only — see `LlamaContextSize`. Respawns on next send with
+    /// the new `-c`, same as `setGPUMode`.
+    func setContextSize(_ size: LlamaContextSize, for id: String) {
+        updateLlamaSetting(for: id) { $0.contextSize = size }
+    }
+
+    /// llama.cpp only — see `FlashAttentionMode`. Respawns on next send with
+    /// the new `-fa`, same as `setGPUMode`.
+    func setFlashAttention(_ mode: FlashAttentionMode, for id: String) {
+        updateLlamaSetting(for: id) { $0.flashAttention = mode }
+    }
+
+    /// Shared plumbing for the per-model llama.cpp run settings: mutate the
+    /// record, stop any running server for it (so the next send respawns
+    /// with the new flags rather than silently keeping the old ones until
+    /// restart), and persist.
+    private func updateLlamaSetting(for id: String, _ mutate: (inout LocalModelRecord) -> Void) {
         guard let index = userModels.firstIndex(where: { $0.id == id }), userModels[index].backend == .llamaCpp else { return }
-        userModels[index].gpuMode = mode
+        mutate(&userModels[index])
         if activeSpawned?.modelId == id { stopSpawnedServer() }
         persistUserModels()
     }
@@ -1481,7 +1637,30 @@ final class LocalAIManager {
             // unset for anyone who's never touched the control changes
             // nothing about today's spawned command.
             let gpuArgs = (record.gpuMode ?? .auto).gpuLayersArgument.map { ["-ngl", $0] } ?? []
-            process.arguments = modelArgs + gpuArgs + ["--port", "\(LocalBackend.llamaCpp.port)", "--host", "127.0.0.1"]
+            // Pin the context window and use a single chat slot. Without
+            // `-c`, llama-server allocates the model's *full trained*
+            // context and splits it across 4 parallel slots — for a modern
+            // model that's a 128K–256K KV cache. Measured live: a 0.8B GGUF
+            // whose weights are ~0.5 GB pulled a 3072 MiB (3 GB) KV cache at
+            // the 256K default; `-c 8192 -np 1` drops that to 96 MiB. On a
+            // RAM-constrained Mac the 3 GB allocation swaps to disk and the
+            // model "takes forever to respond" despite being tiny. The size
+            // is user-tunable per model (see `LlamaContextSize`); `-np 1`
+            // gives that whole window to the one chat rather than quartering
+            // it.
+            let context = record.contextSize ?? .defaultValue
+            let contextArgs = ["-c", "\(context.tokens)", "-np", "1"]
+            let flashArgs = (record.flashAttention ?? .auto).argument.map { ["-fa", $0] } ?? []
+            // llama-server's default thread count uses EVERY core,
+            // efficiency cores included — whenever any layers land on the
+            // CPU (auto mode under GPU-memory pressure, or CPU-only mode),
+            // that saturates the whole machine and the app itself janks
+            // along with it. Pinning generation threads to the performance
+            // cores is the standard Apple Silicon fix: same speed when the
+            // GPU is doing the real work, and a responsive Mac when the
+            // CPU is.
+            let threadArgs = ["-t", "\(Self.performanceCoreCount)"]
+            process.arguments = modelArgs + gpuArgs + contextArgs + flashArgs + threadArgs + ["--port", "\(LocalBackend.llamaCpp.port)", "--host", "127.0.0.1"]
         case .mlx:
             process.arguments = ["--model", record.source ?? "", "--port", "\(LocalBackend.mlx.port)", "--host", "127.0.0.1"]
         case .ollama:
@@ -1552,24 +1731,49 @@ final class LocalAIManager {
         }
     }
 
+    /// Real performance-core count via sysctl, falling back to half the
+    /// active cores if the key is unavailable (pre-Apple-Silicon Macs have
+    /// no perflevel split; half is a safe stand-in for "leave the system
+    /// room to breathe").
+    private static let performanceCoreCount: Int = {
+        var count: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("hw.perflevel0.physicalcpu", &count, &size, nil, 0) == 0, count > 0 {
+            return Int(count)
+        }
+        return max(2, ProcessInfo.processInfo.activeProcessorCount / 2)
+    }()
+
     private func attachLog(_ process: Process, backend: LocalBackend) {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // Coalesced, NOT per-chunk: llama-server (and Ollama) log
+        // continuously — model-load progress during startup, then slot/
+        // request lines throughout every generation. The old handler hopped
+        // to the main actor and mutated `serverLogs` (an @Observable
+        // property) for EVERY chunk, so a chatty server meant a steady
+        // stream of main-thread work and SwiftUI invalidations for the
+        // whole time a local model was loading or answering — reported
+        // live as the app "lagging pretty badly" while running a Hugging
+        // Face model. Batching to 4 flushes/second changes nothing anyone
+        // can see in a log view while cutting that churn by an order of
+        // magnitude or more.
+        let coalescer = ServerLogCoalescer { [weak self] chunk in
+            guard let self else { return }
+            var log = (self.serverLogs[backend] ?? "") + chunk
+            if log.count > 6000 { log = String(log.suffix(6000)) }
+            self.serverLogs[backend] = log
+            if self.isStartingServer,
+               let lastLine = chunk.split(separator: "\n").last.map(String.init),
+               !lastLine.trimmingCharacters(in: .whitespaces).isEmpty {
+                self.startupStatus = String(lastLine.prefix(120))
+            }
+        }
+        pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in
-                guard let self else { return }
-                var log = (self.serverLogs[backend] ?? "") + text
-                if log.count > 6000 { log = String(log.suffix(6000)) }
-                self.serverLogs[backend] = log
-                if self.isStartingServer,
-                   let lastLine = text.split(separator: "\n").last.map(String.init),
-                   !lastLine.trimmingCharacters(in: .whitespaces).isEmpty {
-                    self.startupStatus = String(lastLine.prefix(120))
-                }
-            }
+            coalescer.ingest(text)
         }
         process.terminationHandler = { [weak self] _ in
             Task { @MainActor in
@@ -1659,5 +1863,43 @@ enum LocalAIError: LocalizedError {
         let afterMarker = detail[markerRange.upperBound...]
         guard let endQuote = afterMarker.firstIndex(of: "'") else { return nil }
         return String(afterMarker[afterMarker.startIndex..<endQuote])
+    }
+}
+
+/// Batches a spawned server's chatty stdout/stderr into at most ~4 UI
+/// updates a second. The readability handler feeding `ingest` runs on a
+/// background dispatch thread; the buffer lives behind this class's own
+/// serial queue, and only the periodic flush hops to the main actor —
+/// where `LocalAIManager.serverLogs` (an @Observable property SwiftUI
+/// watches) actually gets touched. See `attachLog` for the live lag report
+/// that motivated this.
+private final class ServerLogCoalescer: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "dev.eaon.local-server-logs")
+    private var buffer = ""
+    private var flushScheduled = false
+    private let onFlush: @MainActor (String) -> Void
+
+    init(onFlush: @escaping @MainActor (String) -> Void) {
+        self.onFlush = onFlush
+    }
+
+    func ingest(_ text: String) {
+        queue.async {
+            self.buffer += text
+            // The main-actor side keeps only the last 6000 characters —
+            // holding more than that here would be work thrown away at
+            // flush time.
+            if self.buffer.count > 8000 { self.buffer = String(self.buffer.suffix(8000)) }
+            guard !self.flushScheduled else { return }
+            self.flushScheduled = true
+            self.queue.asyncAfter(deadline: .now() + 0.25) {
+                let chunk = self.buffer
+                self.buffer = ""
+                self.flushScheduled = false
+                guard !chunk.isEmpty else { return }
+                let deliver = self.onFlush
+                Task { @MainActor in deliver(chunk) }
+            }
+        }
     }
 }

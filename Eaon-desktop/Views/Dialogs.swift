@@ -256,6 +256,126 @@ struct DesktopCallConfirmationDialog: View {
     }
 }
 
+// MARK: - Agent question (ask_user tool)
+
+/// The agent paused mid-task to ask the user something — clickable option
+/// buttons for the choices it offered (tap = answer immediately), plus an
+/// always-present free-text field for saying it in your own words instead.
+struct AgentQuestionDialog: View {
+    @Environment(\.themeColors) private var colors
+    let question: PendingAgentQuestion
+    /// Called with the user's answer, or nil for a dismissal.
+    let onAnswer: (String?) -> Void
+
+    @State private var customAnswer = ""
+    @State private var appeared = false
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        ZStack {
+            colors.backgroundOverlay
+                .ignoresSafeArea()
+                .onTapGesture { onAnswer(nil) }
+
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "questionmark.bubble.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(AppearanceSettings.shared.accentColor)
+                    Text("Eaon has a question")
+                        .font(AppFont.mono(18, weight: .semibold))
+                        .foregroundStyle(colors.textPrimary)
+                }
+                .padding(.bottom, 14)
+
+                Text(question.question)
+                    .font(AppFont.sans(15, weight: .semibold))
+                    .foregroundStyle(colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 16)
+
+                if !question.options.isEmpty {
+                    VStack(spacing: 8) {
+                        ForEach(question.options, id: \.self) { option in
+                            Button {
+                                onAnswer(option)
+                            } label: {
+                                Text(option)
+                                    .font(AppFont.sans(14, weight: .medium))
+                                    .foregroundStyle(colors.textPrimary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 11)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .fill(colors.backgroundInput)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(colors.borderMedium, lineWidth: 1)
+                                    )
+                                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                            .buttonStyle(PressableButtonStyle())
+                        }
+                    }
+                    .padding(.bottom, 14)
+                }
+
+                HStack(spacing: 8) {
+                    TextField(question.options.isEmpty ? "Type your answer…" : "Or type your own answer…", text: $customAnswer)
+                        .textFieldStyle(.plain)
+                        .font(AppFont.sans(14))
+                        .focused($fieldFocused)
+                        .onSubmit { submitCustom() }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(colors.backgroundInput)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .stroke(colors.borderSubtle, lineWidth: 1)
+                        )
+
+                    DialogButton(title: "Answer", style: .primary) { submitCustom() }
+                }
+                .padding(.bottom, 14)
+
+                HStack {
+                    DialogButton(title: "Skip", style: .secondary) { onAnswer(nil) }
+                        .help("Dismiss without answering — Eaon proceeds on its own judgment")
+                    Spacer()
+                }
+            }
+            .padding(24)
+            .frame(width: 460)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(colors.backgroundPopover)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(colors.borderSubtle, lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.3), radius: 40, y: 16)
+            .scaleEffect(appeared ? 1 : 0.94)
+            .opacity(appeared ? 1 : 0)
+        }
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.18)) { appeared = true }
+            // A free-form question (no options) is answered by typing —
+            // put the caret there immediately.
+            if question.options.isEmpty { fieldFocused = true }
+        }
+    }
+
+    private func submitCustom() {
+        let trimmed = customAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        onAnswer(trimmed)
+    }
+}
+
 // MARK: - Enter Auto mode confirmation (coding Agent)
 
 /// The are-you-sure gate before the coding Agent's Auto (unsandboxed) mode.
@@ -912,6 +1032,7 @@ struct ShareChatSheet: View {
                         Image(systemName: "xmark")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(colors.textSecondary)
+                            .iconHoverEffect(for: "xmark")
                             .frame(width: 30, height: 30)
                             .contentShape(Rectangle())
                     }
@@ -1037,6 +1158,7 @@ private struct ShareTarget: View {
                 Image(systemName: icon)
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(colors.backgroundPrimary)
+                    .iconHoverEffect(for: icon)
                     .frame(width: 52, height: 52)
                     .background(Circle().fill(colors.textPrimary.opacity(isHovered ? 0.85 : 1)))
                 Text(label)

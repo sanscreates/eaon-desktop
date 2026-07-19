@@ -216,7 +216,7 @@ final class SkillStore {
         var lastError: Error = SkillInstallError.notFound
         for candidateURL in candidates {
             do {
-                let (data, response) = try await URLSession.shared.data(from: candidateURL)
+                let (data, response) = try await AppHTTP.session.data(from: candidateURL)
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                     lastError = SkillInstallError.notFound
                     continue

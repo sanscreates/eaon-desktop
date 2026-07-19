@@ -125,7 +125,7 @@ struct StatisticsView: View {
                         .foregroundColor(colors.textPrimary.opacity(0.85))
             }
             .toggleStyle(.switch)
-            .tint(appearance.accentColor)
+            .tint(AppearanceSettings.toggleTint)
 
             if nerdHUDEnabled {
                 Divider().frame(height: 14)

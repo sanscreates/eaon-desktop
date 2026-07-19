@@ -6,7 +6,7 @@ struct SidebarView: View {
     @Bindable var viewModel: ChatViewModel
     @Binding var selection: SidebarDestination
     @Binding var showingSearchPalette: Bool
-    @Binding var showingSettings: Bool
+    var onOpenSettings: () -> Void = {}
     var onCollapse: () -> Void = {}
     var onNewChat: () -> Void = {}
     var onDeleteRequest: (Conversation) -> Void = { _ in }
@@ -47,10 +47,20 @@ struct SidebarView: View {
     private var header: some View {
         HStack(spacing: 2) {
             Spacer()
-            SidebarIconButton(systemName: "sidebar.left", help: "Close sidebar", action: onCollapse)
+            // Hidden while Settings is open — its whole navigation lives in
+            // this sidebar, so collapsing it there would leave no way to
+            // switch category or leave (RootView pins it open to match).
+            if !isInSettings {
+                SidebarIconButton(systemName: "sidebar.left", help: "Close sidebar", action: onCollapse)
+            }
         }
         .padding(.horizontal, 10)
         .frame(height: 50)
+    }
+
+    private var isInSettings: Bool {
+        if case .settings = selection { return true }
+        return false
     }
 
     // MARK: - Nav items
@@ -64,7 +74,7 @@ struct SidebarView: View {
             }
             SidebarNavRow(
                 icon: "folder.badge.plus",
-                title: "New Projects",
+                title: "New Project",
                 trailing: "⌘P",
                 isActive: selection == .feature(.projects),
                 shortcut: "p"
@@ -81,11 +91,16 @@ struct SidebarView: View {
             ) {
                 selection = .feature(.models)
             }
-            SidebarNavRow(icon: "gearshape", title: "Settings") {
-                showingSettings = true
+            SidebarNavRow(icon: "gearshape", title: "Settings", isActive: isSettingsActive) {
+                onOpenSettings()
             }
         }
         .padding(.bottom, 6)
+    }
+
+    private var isSettingsActive: Bool {
+        if case .settings = selection { return true }
+        return false
     }
 
     // MARK: - Projects
@@ -148,7 +163,8 @@ struct SidebarView: View {
                                 },
                                 onRename: { onRenameRequest(conversation) },
                                 onDelete: { onDeleteRequest(conversation) },
-                                showsPinOption: false
+                                showsPinOption: false,
+                                isGeneratingInBackground: viewModel.isGeneratingInBackground(conversation.id)
                             )
                             .padding(.leading, 20)
                         }
@@ -194,7 +210,8 @@ struct SidebarView: View {
                     },
                     onRename: { onRenameRequest(conversation) },
                     onDelete: { onDeleteRequest(conversation) },
-                    onTogglePin: { viewModel.togglePinned(conversation.id) }
+                    onTogglePin: { viewModel.togglePinned(conversation.id) },
+                    isGeneratingInBackground: viewModel.isGeneratingInBackground(conversation.id)
                 )
             }
         }
@@ -249,7 +266,8 @@ struct SidebarView: View {
                         },
                         onRename: { onRenameRequest(conversation) },
                         onDelete: { onDeleteRequest(conversation) },
-                        onTogglePin: { viewModel.togglePinned(conversation.id) }
+                        onTogglePin: { viewModel.togglePinned(conversation.id) },
+                        isGeneratingInBackground: viewModel.isGeneratingInBackground(conversation.id)
                     )
                 }
             }
@@ -445,6 +463,11 @@ private struct ConversationRow: View {
     /// project's own disclosure, so a project chat's row omits the option
     /// entirely rather than offering a toggle with no visible effect.
     var showsPinOption: Bool = true
+    /// True while this chat is still generating a reply in the
+    /// background — i.e. you switched away from it (a new chat, or a
+    /// different existing one) before it finished. Confirms the other
+    /// model really is still working, rather than leaving that invisible.
+    var isGeneratingInBackground: Bool = false
 
     @State private var isHovered = false
 
@@ -477,6 +500,14 @@ private struct ConversationRow: View {
                 .truncationMode(.tail)
 
             Spacer(minLength: 0)
+
+            // Always visible, hover included — unlike the unread dot below,
+            // "this is still working" stays worth knowing even while your
+            // cursor is right over the row about to open its menu.
+            if isGeneratingInBackground {
+                SidebarGeneratingDot()
+                    .help("Still generating a reply")
+            }
 
             ZStack {
                 if conversation.hasUnread {
@@ -514,6 +545,22 @@ private struct ConversationRow: View {
                 .fill(isActive ? colors.backgroundSelected : (isHovered ? colors.backgroundHover : .clear))
         )
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+}
+
+/// A conversation still generating in the background — you switched away
+/// (a new chat, or a different existing one) before it finished.
+private struct SidebarGeneratingDot: View {
+    @Environment(\.themeColors) private var colors
+    @State private var pulse = false
+
+    var body: some View {
+        Circle()
+            .fill(colors.textSecondary)
+            .frame(width: 6, height: 6)
+            .opacity(pulse ? 0.3 : 1)
+            .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: pulse)
+            .onAppear { pulse = true }
     }
 }
 
@@ -607,6 +654,7 @@ struct SidebarIconButton: View {
             Image(systemName: systemName)
                 .font(.system(size: 16, weight: .regular))
                 .foregroundStyle(colors.textSecondary)
+                .iconHoverEffect(for: systemName)
                 .frame(width: 30, height: 30)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)

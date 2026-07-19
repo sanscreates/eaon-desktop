@@ -42,6 +42,7 @@ struct ProjectsView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "plus")
                         .font(.system(size: 12, weight: .semibold))
+                        .iconHoverEffect(for: "plus")
                     Text("New project")
                         .font(.system(size: 13, weight: .medium))
                 }
@@ -86,6 +87,7 @@ struct ProjectsView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "plus")
                         .font(.system(size: 12, weight: .semibold))
+                        .iconHoverEffect(for: "plus")
                     Text("New project")
                         .font(.system(size: 13, weight: .semibold))
                 }
@@ -142,6 +144,7 @@ private struct ProjectFolderCard: View {
                 Image(systemName: "folder.fill")
                     .font(.system(size: 22, weight: .regular))
                     .foregroundStyle(colors.textSecondary)
+                    .iconHoverEffect(for: "folder.fill")
 
                 Text(project.name)
                     .font(.system(size: 14, weight: .semibold))
@@ -204,6 +207,7 @@ struct ProjectDetailScreen: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(colors.textSecondary)
+                    .iconHoverEffect(for: "chevron.left")
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
@@ -223,6 +227,7 @@ struct ProjectDetailScreen: View {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(colors.textSecondary)
+                    .iconHoverEffect(for: "ellipsis")
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
@@ -282,6 +287,7 @@ private struct ProjectDetailContent: View {
             HStack(spacing: 10) {
                 Image(systemName: "square.and.pencil")
                     .font(.system(size: 14, weight: .medium))
+                    .iconHoverEffect(for: "square.and.pencil")
                 Text("New chat in \(project.name)")
                     .font(.system(size: 14, weight: .medium))
                 Spacer(minLength: 0)
@@ -313,6 +319,7 @@ private struct ProjectChatRow: View {
                 Image(systemName: "message")
                     .font(.system(size: 13))
                     .foregroundStyle(colors.textSecondary)
+                    .iconHoverEffect(for: "message")
                 Text(conversation.title)
                     .font(.system(size: 14))
                     .foregroundStyle(colors.textPrimary)

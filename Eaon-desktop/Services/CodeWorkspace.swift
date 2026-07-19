@@ -87,11 +87,13 @@ enum WorkspaceParser {
     ```eaon:ls
     ```
 
-    After your reply, any eaon:run / eaon:edit / eaon:read / eaon:ls tools execute automatically and their results come back to you in a message beginning "[Tool results". You then continue — this loops until you reply with no tools.
+    After your reply, any eaon:run / eaon:edit / eaon:read / eaon:ls tools execute automatically and their results come back to you in a message beginning "[Tool results". You then continue — this loops until you reply with no tools. (Plain file="…" creates don't loop back — they take effect immediately, so write the whole thing in this one reply.)
+
+    HOW FILES ARE CREATED — read this carefully. The ONLY way to create or change a file here is the file="…" fence in tool 1 above (or eaon:edit for a change). A plain code block with no file attribute, a function/tool call, or an ```eaon:computer / tool="write_file" block does NOT create a file in this workspace — those are not available in chat and nothing will be saved or shown. Do not describe writing a file or narrate steps as if a tool ran; actually emit the file="…" block. (```eaon:mcp is only for connected cloud services like GitHub or Vercel, and only when the user explicitly asks to push/deploy/connect — never for writing the code itself.)
 
     WORKFLOW for coding requests
     1. One short paragraph saying what you'll build. No long plans. Default to writing it directly, right here, this way — even when a connected service (GitHub, Vercel, Supabase, …) could also do this, don't reach for one unless the user specifically asks you to push, deploy, or connect somewhere.
-    2. Write ALL the files, complete from first line to last — never "rest unchanged", never placeholder comments.
+    2. In the SAME reply, immediately write ALL the files, each complete from first line to last — never "rest unchanged", never placeholder comments. Do NOT stop after only saying what you'll build: the intro sentence and the actual file="…" blocks are one single message. Describing a file is not creating it.
     3. Scripts: run the entry file with eaon:run, read the result, and if it failed, fix the file (eaon:edit or a full rewrite) and run again — iterate until it exits cleanly. Websites: skip running; they preview automatically.
     4. Finish with a 1–3 sentence summary.
 
@@ -136,6 +138,10 @@ enum WorkspaceParser {
         /// no confirmation dialog, no "connected services" membership
         /// check.
         case webSearch(argumentsJSON: String)
+        /// An image-generation request — see `ImageGenerationTool`. Not an
+        /// `mcpCall` for the same reason `webSearch` isn't: it's a built-in
+        /// capability, not a connected third-party service.
+        case imageGeneration(argumentsJSON: String)
         /// A desktop-control action — see `DesktopControl`. `tool` is the
         /// bare tool name (e.g. "move_item"), nil when the fence omitted the
         /// `tool="…"` attribute (reported back as an error, not dropped).
@@ -255,6 +261,10 @@ enum WorkspaceParser {
                     if complete {
                         events.append(.webSearch(argumentsJSON: bodyLines.joined(separator: "\n")))
                     }
+                case "image":
+                    if complete {
+                        events.append(.imageGeneration(argumentsJSON: bodyLines.joined(separator: "\n")))
+                    }
                 case "computer":
                     if complete {
                         events.append(.computerCall(tool: toolName, argumentsJSON: bodyLines.joined(separator: "\n")))
@@ -372,7 +382,7 @@ enum WorkspaceParser {
                 file.content = newContent
                 file.isComplete = true
                 byPath[path] = file
-            case .run, .read, .list, .mcpCall, .webSearch, .computerCall:
+            case .run, .read, .list, .mcpCall, .webSearch, .computerCall, .imageGeneration:
                 break
             }
         }

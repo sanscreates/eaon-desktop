@@ -47,7 +47,7 @@ enum WebSearchService {
             "maxLargeSnippets": 0,
         ])
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await AppHTTP.session.data(for: request)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw WebSearchServiceError.decoding
         }

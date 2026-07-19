@@ -111,6 +111,15 @@ enum DesktopConfirmDecision {
     case allowOnce, allowAll, deny
 }
 
+/// A question the agent has paused on, mid-task, waiting for the user —
+/// the `ask_user` tool. `options` are clickable one-tap answers (possibly
+/// empty for a free-form question); the dialog always offers a typed
+/// answer too. Shown by `AgentQuestionDialog`.
+struct PendingAgentQuestion: Equatable {
+    let question: String
+    let options: [String]
+}
+
 struct APIModelResponse: Codable {
     let data: [APIModel]
 }
@@ -150,43 +159,193 @@ class ChatViewModel {
     /// explicit are-you-sure. See `requestAgentPermissionToggle`.
     var isAskingToEnterAutoMode: Bool = false
     var availableModels: [APIModel] = []
-    /// Aqua's hosted image-generation models — fetched separately from
+    /// Eaon's hosted image-generation models — fetched separately from
     /// `availableModels` because `AquaSupportedModels` (behind
     /// `apiService.fetchModels()`) is a hand-maintained chat-only allowlist
     /// that excludes them entirely; this reads the live `type == "image"`
     /// field directly instead. See `AquaImageModels`.
     var aquaImageModels: [APIModel] = []
-    var isGenerating: Bool = false
     var isLoadingModels = false
     var modelsLoadError: String?
-    var activeTypingMessageId: UUID?
-    /// Real status text for the in-flight local model load — e.g. "Loading
-    /// deepseek-r1:7b into memory…" — set only when a pre-flight check
-    /// (Ollama's `/api/ps`, or the spawned-server state for llama.cpp/MLX)
-    /// confirms this specific model actually needs to load, and cleared the
-    /// moment real content starts arriving. Shown in place of the generic
-    /// typing indicator for the local case specifically.
-    var loadingStatusText: String?
-    /// What the agent is doing right now between visible message content —
-    /// running a specific tool, searching the web — for the window where a
-    /// step's own text has already finished streaming but the *next* step
-    /// hasn't started yet (the real network call is in flight). Nil the
-    /// rest of the time. Not tied to any one `ChatMessage`, since nothing
-    /// about this phase belongs to a specific message — shown as its own
-    /// small transient row at the bottom of the conversation instead.
-    var agentActivityText: String?
     var pendingAttachments: [MessageAttachment] = []
     var composerNotice: String?
-    /// Non-nil exactly while the run-confirmation dialog should be
-    /// showing — the file path the agent wants to execute. See
-    /// `confirmRunIfNeeded(path:)`.
-    var pendingRunConfirmation: String?
-    /// Non-nil exactly while the MCP call-confirmation dialog should be
-    /// showing. See `confirmMCPCallIfNeeded(server:tool:argumentsJSON:)`.
-    var pendingMCPCallConfirmation: PendingMCPCall?
-    /// Non-nil exactly while the desktop-control confirmation dialog should
-    /// be showing. See `confirmDesktopCallIfNeeded(tool:arguments:)`.
-    var pendingDesktopCallConfirmation: PendingDesktopCall?
+
+    // MARK: - Per-conversation generation state
+    //
+    // `isGenerating`, `activeTypingMessageId`, `loadingStatusText`,
+    // `agentActivityText`, and the three `pendingXConfirmation` fields used
+    // to be plain scalars on `ChatViewModel` itself — correct as long as
+    // only one conversation could ever be generating at a time. Starting a
+    // new chat (or switching to a different existing one) while another was
+    // still streaming broke that assumption two ways at once: `startSend()`
+    // unconditionally cancelled the *one* shared `generationTask` before
+    // starting a new one (the other conversation's reply was cut off,
+    // literally the bug reported), and even without that, the shared
+    // `messages` array itself would have been swapped out from under the
+    // old generation the moment `selectConversation`/`startNewChat` ran —
+    // its `setAssistantMessageContent`/`finalizeGeneration` calls would
+    // silently no-op forever after (the message id they're looking for
+    // isn't in the new array), so the old reply would just stop advancing
+    // with no error, frozen at whatever had streamed in before the switch.
+    //
+    // `GenerationSession` holds everything one in-flight generation needs,
+    // keyed by the conversation it belongs to — computed properties below
+    // (`isGenerating`, `activeTypingMessageId`, etc.) read the CURRENTLY
+    // VISIBLE conversation's session, so every existing call site that
+    // reads `viewModel.isGenerating` (the composer, message rows, dialogs)
+    // keeps working unchanged: switching conversations just changes which
+    // session those computed properties resolve to.
+    @MainActor
+    @Observable
+    fileprivate final class GenerationSession {
+        let conversationId: UUID
+        var task: Task<Void, Never>?
+        var typewriter: TypewriterStreamController?
+        var activeTypingMessageId: UUID?
+        /// Real status text for the in-flight local model load — e.g.
+        /// "Loading deepseek-r1:7b into memory…" — set only when a
+        /// pre-flight check confirms this specific model actually needs to
+        /// load, cleared the moment real content starts arriving.
+        var loadingStatusText: String?
+        /// What the agent is doing right now between visible message
+        /// content — running a specific tool, searching the web — for the
+        /// window where a step's own text has already finished streaming
+        /// but the next step hasn't started yet. Not tied to any one
+        /// `ChatMessage`; shown as its own transient row.
+        var agentActivityText: String?
+        var pendingRunConfirmation: String?
+        var pendingMCPCallConfirmation: PendingMCPCall?
+        var pendingDesktopCallConfirmation: PendingDesktopCall?
+        var pendingAgentQuestion: PendingAgentQuestion?
+        var runConfirmationContinuation: CheckedContinuation<Bool, Never>?
+        var mcpCallConfirmationContinuation: CheckedContinuation<Bool, Never>?
+        var desktopCallConfirmationContinuation: CheckedContinuation<DesktopConfirmDecision, Never>?
+        /// Resumed with the user's answer, or nil if they dismissed the
+        /// question without answering.
+        var agentQuestionContinuation: CheckedContinuation<String?, Never>?
+
+        init(conversationId: UUID) {
+            self.conversationId = conversationId
+        }
+    }
+
+    /// Every conversation with a generation currently running (or a
+    /// just-finished one not yet cleaned up), keyed by conversation id.
+    private var sessions: [UUID: GenerationSession] = [:]
+
+    /// The existing session for `id`, or a freshly created one — never
+    /// nil, so every generation-pipeline call site can just call this and
+    /// write straight into the result instead of juggling optionals.
+    private func session(for id: UUID) -> GenerationSession {
+        if let existing = sessions[id] { return existing }
+        let created = GenerationSession(conversationId: id)
+        sessions[id] = created
+        return created
+    }
+
+    /// A finished generation's session serves no further purpose — removed
+    /// so `sessions` doesn't grow forever across a long-running app session
+    /// with many chats.
+    private func endSession(for id: UUID) {
+        sessions[id] = nil
+    }
+
+    /// True for the currently VISIBLE conversation only — the send
+    /// button/composer's own sense of "busy." A different conversation
+    /// generating in the background never affects this.
+    var isGenerating: Bool {
+        guard let id = currentConversationId else { return false }
+        return sessions[id]?.task != nil
+    }
+
+    /// True for ANY conversation with a generation running right now,
+    /// visible or not — used by the sidebar to show a small indicator on a
+    /// chat that's still replying while a different one is on screen.
+    func isGeneratingInBackground(_ id: UUID) -> Bool {
+        id != currentConversationId && sessions[id]?.task != nil
+    }
+
+    var activeTypingMessageId: UUID? {
+        currentConversationId.flatMap { sessions[$0]?.activeTypingMessageId }
+    }
+
+    var loadingStatusText: String? {
+        currentConversationId.flatMap { sessions[$0]?.loadingStatusText }
+    }
+
+    var agentActivityText: String? {
+        currentConversationId.flatMap { sessions[$0]?.agentActivityText }
+    }
+
+    /// The session whose pending confirmation should currently drive the
+    /// dialog, for a given continuation. The VISIBLE conversation wins if
+    /// it's the one blocked; otherwise ANY background conversation waiting on
+    /// a confirmation surfaces its dialog too.
+    ///
+    /// This used to resolve only the visible conversation, on the reasoning
+    /// that a background chat's confirmation shouldn't "pop a dialog over an
+    /// unrelated conversation." In practice that produced a silent FREEZE:
+    /// in the default Sandboxed agent mode every command needs confirming, so
+    /// starting an agent task and then switching to another chat left the
+    /// agent blocked on a dialog that could never appear — it looked like the
+    /// generation just stopped mid-run, with no way to un-stick it short of
+    /// switching back to exactly that chat. Surfacing the waiting dialog
+    /// (with the command detail it already shows) is the lesser evil: the
+    /// user explicitly started that agent, so its request for approval is
+    /// relevant to them, not a surprise.
+    private func sessionAwaitingConfirmation(_ isWaiting: (GenerationSession) -> Bool) -> GenerationSession? {
+        if let id = currentConversationId, let visible = sessions[id], isWaiting(visible) { return visible }
+        // Deterministic tiebreak by conversation id, not raw dictionary order:
+        // if two background agents are ever blocked on a confirmation at once,
+        // the computed property (which renders the dialog) and the respond
+        // method (which resolves the button press) MUST pick the same session,
+        // or an "Allow" could approve the wrong agent's command. Dictionary
+        // iteration order isn't stable across a mutation of `sessions`; a
+        // sorted key is.
+        return sessions
+            .filter { isWaiting($0.value) }
+            .sorted { $0.key.uuidString < $1.key.uuidString }
+            .first?.value
+    }
+
+    var pendingRunConfirmation: String? {
+        sessionAwaitingConfirmation { $0.runConfirmationContinuation != nil }?.pendingRunConfirmation
+    }
+
+    var pendingMCPCallConfirmation: PendingMCPCall? {
+        sessionAwaitingConfirmation { $0.mcpCallConfirmationContinuation != nil }?.pendingMCPCallConfirmation
+    }
+
+    var pendingDesktopCallConfirmation: PendingDesktopCall? {
+        sessionAwaitingConfirmation { $0.desktopCallConfirmationContinuation != nil }?.pendingDesktopCallConfirmation
+    }
+
+    var pendingAgentQuestion: PendingAgentQuestion? {
+        sessionAwaitingConfirmation { $0.agentQuestionContinuation != nil }?.pendingAgentQuestion
+    }
+
+    /// The user's reply to the agent's `ask_user` question — or nil for a
+    /// dismissal, which resumes the loop with an honest "declined to
+    /// answer" result rather than hanging it.
+    func answerAgentQuestion(_ answer: String?) {
+        guard let s = sessionAwaitingConfirmation({ $0.agentQuestionContinuation != nil }) else { return }
+        s.agentQuestionContinuation?.resume(returning: answer)
+        s.agentQuestionContinuation = nil
+        s.pendingAgentQuestion = nil
+    }
+
+    /// Pauses the agent loop on a real question dialog and returns what the
+    /// user said — the `ask_user` tool's whole implementation. Same
+    /// continuation pattern as the desktop-call confirmation.
+    private func presentAgentQuestion(_ question: PendingAgentQuestion, for conversationId: UUID) async -> String? {
+        let generationSession = session(for: conversationId)
+        generationSession.pendingAgentQuestion = question
+        let answer = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            generationSession.agentQuestionContinuation = continuation
+        }
+        generationSession.pendingAgentQuestion = nil
+        return answer
+    }
 
     // MARK: - Memory backfill (mining facts from chats that predate turning memory on)
 
@@ -257,7 +416,7 @@ class ChatViewModel {
     /// Chat-capable models with per-model hiding applied, but *not* filtered
     /// by disabled providers — this is what the model picker browses so a
     /// disabled provider's section stays visible (and re-toggleable) there.
-    /// Merges Aqua's catalog with BYOK providers and local models (Ollama /
+    /// Merges Eaon's catalog with BYOK providers and local models (Ollama /
     /// llama.cpp / MLX).
     var allChatCapableModels: [APIModel] {
         let aquaModels = availableModels
@@ -269,7 +428,7 @@ class ChatViewModel {
             .filter { !ModelPreferencesStore.shared.isHidden($0.id) }
         // Deduplicated because the same model id can arrive from more than
         // one source at once — e.g. a BYOK gateway serving deepseek-v4-flash
-        // while Aqua's catalog also lists it. Everything downstream (routing,
+        // while Eaon's catalog also lists it. Everything downstream (routing,
         // provider grouping) is a function of the bare id, so both copies
         // land in the same picker group — and duplicate ids inside one
         // ForEach corrupt LazyVStack's layout (the blank-gap /
@@ -288,7 +447,7 @@ class ChatViewModel {
         }
     }
 
-    /// Which actual provider (connection) serves a model — Aqua's one
+    /// Which actual provider (connection) serves a model — Eaon's one
     /// connection, or a specific BYOK config — or `nil` for a local model,
     /// which no provider toggle can ever gate. This is the real "provider"
     /// the user means when they say "turn off a provider": Aqua serves many
@@ -301,7 +460,7 @@ class ChatViewModel {
         return .aqua
     }
 
-    /// Image-generation models — Aqua's own hosted ones plus any configured
+    /// Image-generation models — Eaon's own hosted ones plus any configured
     /// BYOK/local image connections. Deliberately separate from
     /// `chatModels`/`allChatCapableModels`: image generation is one
     /// request/response with none of the chat-specific machinery (context
@@ -350,12 +509,21 @@ class ChatViewModel {
     /// steps) legitimately take many steps, where a plain chat turn rarely
     /// needs more than a handful. All are still bounded — the user can also
     /// stop generation at any time.
-    private var maxAgentSteps: Int { (currentMode == .claw || currentMode == .agent) ? 40 : 16 }
+    private var maxAgentSteps: Int { currentMode == .agent ? 40 : 16 }
+
+    /// Agent's actual tool set right now — the coding subset always, plus
+    /// the wider device-control tools (apps, browser, AppleScript, Trash)
+    /// once the user has explicitly turned that on in Settings. Used
+    /// everywhere a hint/error message needs to name Agent's real
+    /// available tools, so that text never claims a narrower (or wider)
+    /// catalog than what's actually offered.
+    private var agentAvailableTools: [DesktopTool] {
+        DesktopControlStore.shared.isEnabled ? DesktopTool.allCases : DesktopTool.codingTools
+    }
 
     // MARK: - Run confirmation (agent code execution is unsandboxed — see WorkspaceRunner)
 
     private static let approvedRunConversationsKey = "approved_run_conversations"
-    private var runConfirmationContinuation: CheckedContinuation<Bool, Never>?
 
     private var approvedRunConversationIds: Set<UUID> {
         get {
@@ -374,33 +542,40 @@ class ChatViewModel {
     /// conversation (persisted), never once per run. A conversation with
     /// no id yet (nothing saved) always asks, since there's nothing to
     /// remember approval against.
-    private func confirmRunIfNeeded(path: String) async -> Bool {
+    private func confirmRunIfNeeded(path: String, for conversationId: UUID) async -> Bool {
         if AlwaysAllowStore.shared.isEnabled { return true }
-        if let id = currentConversationId, approvedRunConversationIds.contains(id) { return true }
+        if approvedRunConversationIds.contains(conversationId) { return true }
 
-        pendingRunConfirmation = path
-        let approved = await withCheckedContinuation { continuation in
-            runConfirmationContinuation = continuation
+        let generationSession = session(for: conversationId)
+        generationSession.pendingRunConfirmation = path
+        let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            generationSession.runConfirmationContinuation = continuation
         }
-        pendingRunConfirmation = nil
+        generationSession.pendingRunConfirmation = nil
 
-        if approved, let id = currentConversationId {
+        if approved {
             var ids = approvedRunConversationIds
-            ids.insert(id)
+            ids.insert(conversationId)
             approvedRunConversationIds = ids
         }
         return approved
     }
 
-    /// Called by the confirmation dialog's Allow/Don't Run buttons.
+    /// Called by the confirmation dialog's Allow/Don't Run buttons —
+    /// resolves whichever conversation the dialog is currently showing for
+    /// (visible, or a surfaced background one — see `sessionAwaitingConfirmation`).
     func respondToRunConfirmation(allow: Bool) {
-        runConfirmationContinuation?.resume(returning: allow)
-        runConfirmationContinuation = nil
+        // Resolve whichever session the dialog is actually showing for —
+        // the visible conversation if it's the one waiting, else the
+        // background conversation whose confirmation got surfaced. Keying off
+        // `currentConversationId` alone would silently fail to un-block a
+        // background agent (its continuation would never resume).
+        guard let s = sessionAwaitingConfirmation({ $0.runConfirmationContinuation != nil }) else { return }
+        s.runConfirmationContinuation?.resume(returning: allow)
+        s.runConfirmationContinuation = nil
     }
 
     // MARK: - MCP call confirmation (unsandboxed, real external effects)
-
-    private var mcpCallConfirmationContinuation: CheckedContinuation<Bool, Never>?
 
     /// Unlike `confirmRunIfNeeded`, this asks every single time rather than
     /// once per conversation — an MCP tool call has real, non-sandboxed
@@ -409,26 +584,27 @@ class ChatViewModel {
     /// chat" would too easily rubber-stamp. `AlwaysAllowStore` bypasses this
     /// entirely when the user has turned it on; this per-call asking is
     /// only the behavior when that's off.
-    private func confirmMCPCallIfNeeded(server: MCPServerDefinition, tool: String, argumentsJSON: String) async -> Bool {
+    private func confirmMCPCallIfNeeded(server: MCPServerDefinition, tool: String, argumentsJSON: String, for conversationId: UUID) async -> Bool {
         if AlwaysAllowStore.shared.isEnabled { return true }
-        pendingMCPCallConfirmation = PendingMCPCall(serverDisplayName: server.displayName, tool: tool, argumentsJSON: argumentsJSON)
-        let approved = await withCheckedContinuation { continuation in
-            mcpCallConfirmationContinuation = continuation
+        let generationSession = session(for: conversationId)
+        generationSession.pendingMCPCallConfirmation = PendingMCPCall(serverDisplayName: server.displayName, tool: tool, argumentsJSON: argumentsJSON)
+        let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            generationSession.mcpCallConfirmationContinuation = continuation
         }
-        pendingMCPCallConfirmation = nil
+        generationSession.pendingMCPCallConfirmation = nil
         return approved
     }
 
     /// Called by the confirmation dialog's Allow/Don't Allow buttons.
     func respondToMCPCallConfirmation(allow: Bool) {
-        mcpCallConfirmationContinuation?.resume(returning: allow)
-        mcpCallConfirmationContinuation = nil
+        guard let s = sessionAwaitingConfirmation({ $0.mcpCallConfirmationContinuation != nil }) else { return }
+        s.mcpCallConfirmationContinuation?.resume(returning: allow)
+        s.mcpCallConfirmationContinuation = nil
     }
 
     // MARK: - Desktop control confirmation (real effects on this Mac)
 
     private static let approvedDesktopConversationsKey = "approved_desktop_conversations"
-    private var desktopCallConfirmationContinuation: CheckedContinuation<DesktopConfirmDecision, Never>?
 
     private var approvedDesktopConversationIds: Set<UUID> {
         get {
@@ -447,24 +623,27 @@ class ChatViewModel {
     /// approval via "Allow for This Chat" (persisted per-conversation, like
     /// the coding agent's run approval). A brand-new unsaved chat has no id
     /// to remember against, so it always asks.
-    private func confirmDesktopCallIfNeeded(tool: DesktopTool, arguments: [String: Any]) async -> Bool {
+    private func confirmDesktopCallIfNeeded(tool: DesktopTool, arguments: [String: Any], for conversationId: UUID) async -> Bool {
         if tool.isReadOnly { return true }
-        // The coding Agent's Sandboxed/Auto toggle (Shift+Tab). In Auto mode
-        // the user has explicitly opted out of per-command confirmation — the
-        // whole point of the toggle — so commands run without asking. In
-        // Sandboxed mode (the default) it falls through to the normal ask.
-        // Never applies in Eaon Claw, which always uses its own confirm flow.
+        // Agent's Sandboxed/Auto toggle (Shift+Tab) — applies uniformly to
+        // every tool Agent can call now, coding and the wider device-control
+        // set alike (there's no separate Claw confirm flow to carve out
+        // anymore). In Auto mode the user has explicitly opted out of
+        // per-command confirmation — the whole point of the toggle — so
+        // commands run without asking. In Sandboxed mode (the default) it
+        // falls through to the normal ask.
         if currentMode == .agent, agentAutoRun { return true }
-        if let id = currentConversationId, approvedDesktopConversationIds.contains(id) { return true }
+        if approvedDesktopConversationIds.contains(conversationId) { return true }
 
-        pendingDesktopCallConfirmation = PendingDesktopCall(
+        let generationSession = session(for: conversationId)
+        generationSession.pendingDesktopCallConfirmation = PendingDesktopCall(
             summary: tool.confirmationSummary(arguments: arguments),
             detail: tool.confirmationDetail(arguments: arguments)
         )
-        let decision = await withCheckedContinuation { continuation in
-            desktopCallConfirmationContinuation = continuation
+        let decision = await withCheckedContinuation { (continuation: CheckedContinuation<DesktopConfirmDecision, Never>) in
+            generationSession.desktopCallConfirmationContinuation = continuation
         }
-        pendingDesktopCallConfirmation = nil
+        generationSession.pendingDesktopCallConfirmation = nil
 
         switch decision {
         case .deny:
@@ -472,19 +651,18 @@ class ChatViewModel {
         case .allowOnce:
             return true
         case .allowAll:
-            if let id = currentConversationId {
-                var ids = approvedDesktopConversationIds
-                ids.insert(id)
-                approvedDesktopConversationIds = ids
-            }
+            var ids = approvedDesktopConversationIds
+            ids.insert(conversationId)
+            approvedDesktopConversationIds = ids
             return true
         }
     }
 
     /// Called by the desktop confirmation dialog's three buttons.
     func respondToDesktopCallConfirmation(_ decision: DesktopConfirmDecision) {
-        desktopCallConfirmationContinuation?.resume(returning: decision)
-        desktopCallConfirmationContinuation = nil
+        guard let s = sessionAwaitingConfirmation({ $0.desktopCallConfirmationContinuation != nil }) else { return }
+        s.desktopCallConfirmationContinuation?.resume(returning: decision)
+        s.desktopCallConfirmationContinuation = nil
     }
 
     // MARK: - Agent Sandboxed/Auto toggle (Shift+Tab)
@@ -526,8 +704,7 @@ class ChatViewModel {
     private static let selectedModelKey = "selected_model_id"
     private static let customInstructionsKey = "custom_instructions"
     private static let currentModeKey = "eaon_current_mode"
-    private var typewriter: TypewriterStreamController?
-    private var generationTask: Task<Void, Never>?
+    private static let thinkingEnabledKey = "eaon_thinking_enabled"
 
     /// User-authored, opt-in system instruction sent with every request —
     /// global, not per-conversation, matching how every other chat app's
@@ -538,6 +715,26 @@ class ChatViewModel {
     /// invisible coding-agent prompt this app used to always send.
     var customInstructions: String = "" {
         didSet { UserDefaults.standard.set(customInstructions, forKey: Self.customInstructionsKey) }
+    }
+
+    /// Global on/off for extended thinking on local Ollama models that
+    /// support it (`LocalModelRecord.supportsThinkingToggle`) — verified
+    /// live against a real Ollama server that `think` passes through the
+    /// OpenAI-compatible endpoint this app uses. Aqua/cloud models ignore
+    /// this entirely; only `streamLocalCompletion` reads it. Defaults to
+    /// true (model's own default reasoning behavior) so this is purely
+    /// opt-out, never a surprise regression for models that already think.
+    var thinkingEnabled: Bool = true {
+        didSet { UserDefaults.standard.set(thinkingEnabled, forKey: Self.thinkingEnabledKey) }
+    }
+
+    /// Whether the currently selected model is a local Ollama model that
+    /// actually advertised `think` support via `/api/tags` — the "+" menu
+    /// uses this to gray out/explain the Thinking row instead of offering a
+    /// toggle that would silently do nothing (e.g. for Aqua, which doesn't
+    /// support this at all).
+    var currentModelSupportsThinkingToggle: Bool {
+        LocalAIManager.shared.record(withId: selectedModel)?.supportsThinkingToggle == true
     }
 
     init() {
@@ -555,6 +752,9 @@ class ChatViewModel {
             currentMode = mode
         }
         customInstructions = UserDefaults.standard.string(forKey: Self.customInstructionsKey) ?? ""
+        if UserDefaults.standard.object(forKey: Self.thinkingEnabledKey) != nil {
+            thinkingEnabled = UserDefaults.standard.bool(forKey: Self.thinkingEnabledKey)
+        }
         loadConversations()
         loadProjects()
         refreshContextLimit()
@@ -566,6 +766,34 @@ class ChatViewModel {
                 await fetchModels()
             }
         }
+
+        // The floating desktop assistant's "Continue in Eaon" handoff —
+        // its quick transcript arrives here and becomes a real, saved
+        // conversation. Observer token intentionally not stored/removed:
+        // this view model lives for the whole app session.
+        NotificationCenter.default.addObserver(
+            forName: .eaonQuickAssistantHandoff, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let turns = note.userInfo?["turns"] as? [[String: String]] else { return }
+            Task { @MainActor in self?.importQuickAssistantTranscript(turns) }
+        }
+    }
+
+    /// Turns the quick assistant's scratch transcript into a normal saved
+    /// conversation and shows it, so "Continue in Eaon" actually continues —
+    /// full history in place, ready for the next message.
+    func importQuickAssistantTranscript(_ turns: [[String: String]]) {
+        guard !turns.isEmpty else { return }
+        startNewChat()
+        messages = turns.map { turn in
+            ChatMessage(
+                content: turn["text"] ?? "",
+                isUser: turn["role"] == "user",
+                modelId: turn["role"] == "user" ? nil : selectedModel
+            )
+        }
+        saveMessages()
+        enterMode(.chat)
     }
 
     // MARK: - Conversation persistence
@@ -750,6 +978,49 @@ class ChatViewModel {
         persistConversations()
     }
 
+    /// Mutates conversation `id`'s message array wherever it currently
+    /// lives — the live `messages` array if that conversation is the one
+    /// on screen right now (so the UI updates immediately, exactly as
+    /// before), or directly inside `conversations` if the user has since
+    /// navigated elsewhere, so a background generation's output is never
+    /// silently lost. Every generation-pipeline mutation (append a
+    /// placeholder, set streamed content, mark finalized/errored) goes
+    /// through this instead of touching `messages`/`conversations`
+    /// directly, since which one is "correct" depends on whether this
+    /// conversation is still the visible one at the moment each mutation
+    /// happens — that can change mid-generation.
+    @discardableResult
+    private func withMessages<T>(for id: UUID, _ body: (inout [ChatMessage]) -> T) -> T? {
+        if id == currentConversationId {
+            return body(&messages)
+        }
+        guard let index = conversations.firstIndex(where: { $0.id == id }) else {
+            // Deleted mid-generation — nowhere left to write; drop it.
+            return nil
+        }
+        return body(&conversations[index].messages)
+    }
+
+    /// The generation-pipeline equivalent of `saveMessages()` for a
+    /// specific conversation id, correct whether or not it's the one
+    /// currently on screen. `saveMessages()` itself only ever operates on
+    /// `self.messages` (the visible conversation), which is wrong once the
+    /// user has switched away from the conversation a background
+    /// generation is still running for — this mirrors its "update an
+    /// existing conversation" branch directly against `conversations`.
+    private func persistGeneration(for id: UUID) {
+        if id == currentConversationId {
+            saveMessages()
+            return
+        }
+        guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
+        conversations[index].updatedAt = Date()
+        if conversations[index].title == Conversation.placeholderTitle() {
+            conversations[index].title = Self.deriveTitle(from: conversations[index].messages)
+        }
+        persistConversations()
+    }
+
     private static func deriveTitle(from messages: [ChatMessage]) -> String {
         guard let first = messages.first(where: { $0.isUser && !$0.content.isEmpty })?.content
                 ?? messages.first?.content, !first.isEmpty else {
@@ -819,7 +1090,14 @@ class ChatViewModel {
         inputText = ""
         pendingAttachments = []
         composerNotice = nil
-        isGenerating = false
+        // No `isGenerating = false` here anymore — that used to forcibly
+        // clear the ONE shared generating flag even if a reply was still
+        // actually streaming, which is exactly what let a second message
+        // get sent (and cancel the first one's task) while it was still
+        // running. `isGenerating` is now computed per conversation id, so
+        // whatever was generating keeps generating, tracked under its own
+        // (still real, unaffected) conversation id — only what's shown
+        // here changes.
         currentConversationId = nil
         pendingProjectId = projectId
         resetWorkspace()
@@ -906,7 +1184,7 @@ class ChatViewModel {
     /// the raw Aqua fetch (the live catalog has returned the same id twice)
     /// and — the case that actually bites in practice — to the merged
     /// all-sources list in `allChatCapableModels`, where a BYOK gateway and
-    /// Aqua's catalog can each serve the same id. SwiftUI's `ForEach`
+    /// Eaon's catalog can each serve the same id. SwiftUI's `ForEach`
     /// requires unique ids; duplicates don't render twice so much as
     /// corrupt the LazyVStack's layout (blank gaps, rows vanishing
     /// mid-scroll).
@@ -956,9 +1234,13 @@ class ChatViewModel {
     /// Rough token count for everything in the current conversation, using
     /// the same ~4 chars/token approximation `StatisticsTracker` already
     /// uses elsewhere in the app — kept consistent rather than inventing a
-    /// second ratio.
+    /// second ratio. Counts UTF-8 bytes, not grapheme clusters: `count` on
+    /// a String walks the whole string (the context badge reads this three
+    /// times per body evaluation, re-run on every streaming tick — an
+    /// O(conversation) walk each time), while `utf8.count` is stored O(1)
+    /// per message. For a ÷4 estimate the difference is noise.
     var estimatedUsedTokens: Int {
-        StatisticsTracker.approxTokens(characters: messages.reduce(0) { $0 + $1.content.count })
+        StatisticsTracker.approxTokens(characters: messages.reduce(0) { $0 + $1.content.utf8.count })
     }
 
     func refreshContextLimit() {
@@ -1065,17 +1347,37 @@ class ChatViewModel {
         pendingAttachments.removeAll { $0.id == id }
     }
 
+    /// Handoff slot for a just-created send task, until `sendMessage()`
+    /// (running as that very task) claims it into the right conversation's
+    /// `GenerationSession.task`. Needed because a brand-new chat has no
+    /// real conversation id yet at the instant `startSend()` runs — only
+    /// `sendMessage()` itself, a little further in, knows which id this
+    /// generation is actually for. Safe without a race: a `Task {}` created
+    /// from `@MainActor` code never begins its body before the synchronous
+    /// code that created it (this very function) has finished running, so
+    /// this assignment always completes before `sendMessage()` could ever
+    /// read it back.
+    private var pendingSendTask: Task<Void, Never>?
+
     /// Kicks off a cancellable generation. The composer calls this instead of
     /// awaiting `sendMessage` directly so the stop button can interrupt it.
+    /// Deliberately does NOT cancel any previous task here — that used to
+    /// unconditionally kill whatever was running before, which is exactly
+    /// what cut off a different conversation's reply the moment you sent a
+    /// message in a new one. `sendMessage()` cancels a stale task for its
+    /// OWN conversation id if needed (an unlikely double-send); it never
+    /// touches another conversation's.
     func startSend() {
-        generationTask?.cancel()
-        generationTask = Task { await sendMessage() }
+        pendingSendTask = Task { [weak self] in await self?.sendMessage() }
     }
 
+    /// Stops generation for the conversation currently on screen only — a
+    /// different, background-generating conversation is untouched.
     func stopGeneration() {
-        typewriter?.markStreamFinished()
-        generationTask?.cancel()
-        generationTask = nil
+        guard let id = currentConversationId, let generationSession = sessions[id] else { return }
+        generationSession.typewriter?.markStreamFinished()
+        generationSession.task?.cancel()
+        generationSession.task = nil
     }
 
     /// Image generation is one request/response — no agent loop, no
@@ -1097,17 +1399,24 @@ class ChatViewModel {
         pendingAttachments = []
         composerNotice = nil
         saveMessages()
+        // Guaranteed non-nil: `saveMessages()` just created (or matched)
+        // the real conversation this generation belongs to — captured
+        // once, used throughout, so switching away or starting a new chat
+        // mid-generation can't redirect this generation's own writes.
+        let conversationId = currentConversationId!
 
-        isGenerating = true
+        let generationSession = session(for: conversationId)
+        generationSession.task = pendingSendTask
+        pendingSendTask = nil
         StatisticsTracker.shared.currentGeneratingModel = modelId
         defer {
-            isGenerating = false
+            endSession(for: conversationId)
             StatisticsTracker.shared.currentGeneratingModel = ""
         }
 
         let loadingId = UUID()
-        messages.append(ChatMessage(id: loadingId, content: "Generating image…", isUser: false, modelId: modelId))
-        saveMessages()
+        withMessages(for: conversationId) { $0.append(ChatMessage(id: loadingId, content: "Generating image…", isUser: false, modelId: modelId)) }
+        persistGeneration(for: conversationId)
 
         do {
             let result: GeneratedImageResult
@@ -1118,20 +1427,22 @@ class ChatViewModel {
                 result = try await OllamaImageFormat.generate(model: record.requestModelId, prompt: trimmed)
             } else {
                 guard let aquaKey = APIKeyStore.loadAPIKey(), !aquaKey.isEmpty else {
-                    markError(id: loadingId, text: "Add your Aqua API key in Settings → Aqua API to generate images.")
+                    markError(id: loadingId, text: "Add your Eaon API key in Settings → Eaon API to generate images.", for: conversationId)
                     return
                 }
                 result = try await AquaImageModels.generate(model: modelId, prompt: trimmed, apiKey: aquaKey)
             }
 
             let attachment = try AttachmentStore.importImageData(result.data, fileName: result.suggestedFileName)
-            guard let index = messages.firstIndex(where: { $0.id == loadingId }) else { return }
-            messages[index].content = ""
-            messages[index].attachments = [attachment]
-            messages[index].isGeneratedImage = true
-            saveMessages()
+            withMessages(for: conversationId) { current in
+                guard let index = current.firstIndex(where: { $0.id == loadingId }) else { return }
+                current[index].content = ""
+                current[index].attachments = [attachment]
+                current[index].isGeneratedImage = true
+            }
+            persistGeneration(for: conversationId)
         } catch {
-            markError(id: loadingId, text: error.localizedDescription)
+            markError(id: loadingId, text: error.localizedDescription, for: conversationId)
         }
     }
 
@@ -1172,47 +1483,10 @@ class ChatViewModel {
             return
         }
 
-        guard !selectedModel.isEmpty, chatModels.contains(where: { $0.id == selectedModel }) else {
-            // This fires for any reason the selection doesn't resolve —
-            // still-loading, zero providers configured at all, or a stale
-            // selection left over from a deleted/hidden model — so the
-            // message must reflect which of those it actually is instead of
-            // always blaming Aqua specifically (chatModels merges Aqua,
-            // BYOK, and local models; most users hitting this have neither
-            // an Aqua key nor any Aqua models loaded).
-            if isLoadingModels {
-                appendSystemError("Still loading models — wait a moment, then pick one from the menu.")
-            } else if chatModels.isEmpty {
-                appendSystemError("No models available yet. Add a provider or API key in Settings, or download a local model from Settings → Models.")
-            } else {
-                appendSystemError("No chat model selected. Pick one from the model menu above.")
-            }
-            return
-        }
-
-        // Routing precedence: BYOK config → local model (Ollama/llama.cpp/
-        // MLX, no key at all) → Aqua.
-        let customConfig = CustomProviderStore.shared.config(owning: selectedModel)
-        let localRecord = customConfig == nil ? LocalAIManager.shared.record(withId: selectedModel) : nil
-
-        let apiKey: String
-        if let customConfig {
-            guard let customKey = CustomProviderStore.shared.apiKey(for: customConfig.id), !customKey.isEmpty else {
-                appendSystemError("No API key saved for \(customConfig.displayName). Add one in Settings → Custom Providers.")
-                return
-            }
-            apiKey = customKey
-        } else if localRecord != nil {
-            // Local servers don't authenticate; they ignore the header.
-            apiKey = "local-no-key"
-        } else {
-            guard let aquaKey = APIKeyStore.loadAPIKey(), !aquaKey.isEmpty else {
-                appendSystemError("Add your Aqua API key in Settings → Aqua API to start chatting.")
-                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
-                return
-            }
-            apiKey = aquaKey
-        }
+        guard let routing = resolveRoutingForSelectedModel() else { return }
+        let customConfig = routing.customConfig
+        let localRecord = routing.localRecord
+        let apiKey = routing.apiKey
 
         let userMsg = ChatMessage(content: text, isUser: true, attachments: attachments, invokedSkillName: invokedSkill?.name)
         messages.append(userMsg)
@@ -1230,11 +1504,103 @@ class ChatViewModel {
             pendingPreviewErrors = []
         }
         saveMessages()
+        // Guaranteed non-nil: `saveMessages()` just above either matched
+        // this chat's existing id or created a brand-new conversation and
+        // set it — captured once, used for the rest of this generation, so
+        // starting a new chat or switching away can't redirect where this
+        // one's own output lands. `modelId` is captured the same way and
+        // for the same reason: `selectedModel` is the model PICKER's live
+        // selection, which the user is free to change the instant they
+        // switch to a different conversation — reading it fresh at each
+        // step of what might be a 40-step agent loop would silently start
+        // sending a DIFFERENT conversation's chosen model mid-generation.
+        let conversationId = currentConversationId!
+        let modelId = selectedModel
 
-        isGenerating = true
-        StatisticsTracker.shared.currentGeneratingModel = selectedModel
-        workspaceDismissedDuringGeneration = false
-        lastAutoFollowedPath = nil
+        await runGenerationLoop(conversationId: conversationId, customConfig: customConfig, localRecord: localRecord, apiKey: apiKey, modelId: modelId)
+    }
+
+    // MARK: - Regenerate & edit
+
+    /// Re-run the most recent user turn, discarding the assistant reply (and
+    /// any tool steps) it produced, then generating fresh. Replaces the old
+    /// regenerate button, which called `startSend()` with an empty composer
+    /// and so silently did nothing.
+    func regenerateLastResponse() {
+        guard !isGenerating, currentConversationId != nil else { return }
+        pendingSendTask = Task { [weak self] in
+            await self?.rerunAfterTruncating(throughUserMessage: nil, editedContent: nil)
+        }
+    }
+
+    /// Edit a past user message and re-run from there: its text is replaced,
+    /// every later message is discarded, and generation restarts — the
+    /// standard "edit & resend" of other chat apps. Attachments on that
+    /// message are kept as they were.
+    func editUserMessageAndResend(id: UUID, newContent: String) {
+        let trimmed = newContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isGenerating, currentConversationId != nil else { return }
+        pendingSendTask = Task { [weak self] in
+            await self?.rerunAfterTruncating(throughUserMessage: id, editedContent: trimmed)
+        }
+    }
+
+    /// Shared body for regenerate/edit: truncates the conversation so it ends
+    /// on the target user message (the last user message when `messageId` is
+    /// nil), optionally replacing that message's text, then re-runs the same
+    /// generation core `sendMessage` uses. Text-path only — the image bubble
+    /// never offers these, and re-running an image generation is a separate
+    /// flow.
+    private func rerunAfterTruncating(throughUserMessage messageId: UUID?, editedContent: String?) async {
+        guard let conversationId = currentConversationId else { pendingSendTask = nil; return }
+        if imageModels.contains(where: { $0.id == selectedModel }) { pendingSendTask = nil; return }
+
+        var didTruncate = false
+        withMessages(for: conversationId) { messages in
+            let cutIndex: Int
+            if let messageId {
+                guard let index = messages.firstIndex(where: { $0.id == messageId }), messages[index].isUser else { return }
+                if let editedContent { messages[index].content = editedContent }
+                cutIndex = index
+            } else {
+                guard let index = messages.lastIndex(where: { $0.isUser }) else { return }
+                cutIndex = index
+            }
+            if cutIndex + 1 < messages.count {
+                messages.removeSubrange((cutIndex + 1)...)
+            }
+            didTruncate = true
+        }
+        guard didTruncate else { pendingSendTask = nil; return }
+        persistGeneration(for: conversationId)
+
+        guard let routing = resolveRoutingForSelectedModel() else { pendingSendTask = nil; return }
+        await runGenerationLoop(conversationId: conversationId, customConfig: routing.customConfig, localRecord: routing.localRecord, apiKey: routing.apiKey, modelId: selectedModel)
+    }
+
+    /// The generation core shared by `sendMessage`, regenerate, and edit:
+    /// registers the (on-screen or background) generation session, runs the
+    /// agent loop over the conversation as it currently stands — its last
+    /// message a user turn — and fires memory extraction when it finishes.
+    private func runGenerationLoop(
+        conversationId: UUID,
+        customConfig: CustomProviderConfig?,
+        localRecord: LocalModelRecord?,
+        apiKey: String,
+        modelId: String
+    ) async {
+        let generationSession = session(for: conversationId)
+        generationSession.task = pendingSendTask
+        pendingSendTask = nil
+        StatisticsTracker.shared.currentGeneratingModel = modelId
+        // Only the VISIBLE conversation's own generation should touch the
+        // workspace panel that's currently on screen — a background one's
+        // files are re-derived fresh by `selectConversation` whenever the
+        // user actually switches to it.
+        if conversationId == currentConversationId {
+            workspaceDismissedDuringGeneration = false
+            lastAutoFollowedPath = nil
+        }
 
         // The agent loop: stream a reply, execute any tools it requested,
         // feed the results back as a message, repeat until a reply requests
@@ -1244,7 +1610,7 @@ class ChatViewModel {
 
         let stepBudget = maxAgentSteps
         for step in 1...stepBudget {
-            let outcome = await streamOneAgentStep(customConfig: customConfig, localRecord: localRecord, apiKey: apiKey)
+            let outcome = await streamOneAgentStep(customConfig: customConfig, localRecord: localRecord, apiKey: apiKey, conversationId: conversationId, modelId: modelId)
             guard case .completed(let stepMsgId, let replyText) = outcome, !Task.isCancelled else { break }
 
             // A "successful" stream that produced literally nothing — no
@@ -1254,14 +1620,16 @@ class ChatViewModel {
             // plugins' tool descriptions); surface it instead of going
             // silent.
             if replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                markError(id: stepMsgId, text: "No response was generated. This can happen with a local model under a large prompt — try disconnecting a plugin you're not using right now, or try again.")
+                markError(id: stepMsgId, text: "No response was generated. This can happen with a local model under a large prompt — try disconnecting a plugin you're not using right now, or try again.", for: conversationId)
                 break
             }
 
-            guard let toolRun = await executeAgentTools(inReplyText: replyText) else { break }
+            guard let toolRun = await executeAgentTools(inReplyText: replyText, conversationId: conversationId) else { break }
 
-            messages.append(ChatMessage(content: toolRun.results, isUser: false, isToolResult: true))
-            saveMessages()
+            withMessages(for: conversationId) {
+                $0.append(ChatMessage(content: toolRun.results, isUser: false, attachments: toolRun.attachments, isToolResult: true))
+            }
+            persistGeneration(for: conversationId)
 
             // If the exact same run failure comes back three times, stop
             // burning tokens and leave it with the user.
@@ -1273,12 +1641,14 @@ class ChatViewModel {
                     lastFailureSignature = signature
                 }
                 if identicalFailureStreak >= 3 {
-                    messages.append(ChatMessage(
-                        content: "Stopped — the same error came back three times in a row. Tell the model what to try differently, or edit the file yourself in the workspace.",
-                        isUser: false,
-                        isError: true
-                    ))
-                    saveMessages()
+                    withMessages(for: conversationId) {
+                        $0.append(ChatMessage(
+                            content: "Stopped — the same error came back three times in a row. Tell the model what to try differently, or edit the file yourself in the workspace.",
+                            isUser: false,
+                            isError: true
+                        ))
+                    }
+                    persistGeneration(for: conversationId)
                     break
                 }
             } else {
@@ -1292,21 +1662,74 @@ class ChatViewModel {
             }
         }
 
-        self.typewriter = nil
-        self.generationTask = nil
-        activeTypingMessageId = nil
-        isGenerating = false
         StatisticsTracker.shared.currentGeneratingModel = ""
-        refreshWorkspace(streaming: false)
+        if conversationId == currentConversationId {
+            refreshWorkspace(streaming: false)
+        }
 
-        triggerMemoryExtractionIfNeeded(customConfig: customConfig, localRecord: localRecord, apiKey: apiKey)
+        let finalMessages = withMessages(for: conversationId) { $0 } ?? []
+        endSession(for: conversationId)
+        triggerMemoryExtractionIfNeeded(in: finalMessages, selectedModel: modelId, customConfig: customConfig, localRecord: localRecord, apiKey: apiKey)
+    }
+
+    private struct GenerationRouting {
+        let customConfig: CustomProviderConfig?
+        let localRecord: LocalModelRecord?
+        let apiKey: String
+    }
+
+    /// Resolves which provider serves the currently-selected model and its
+    /// key, or surfaces a specific user-facing error and returns nil (still
+    /// loading, none configured, a stale selection, or a missing BYOK/Aqua
+    /// key). Routing precedence: BYOK config → local model → Aqua. Shared by
+    /// the initial send and the regenerate/edit re-runs so all three route
+    /// identically.
+    private func resolveRoutingForSelectedModel() -> GenerationRouting? {
+        guard !selectedModel.isEmpty, chatModels.contains(where: { $0.id == selectedModel }) else {
+            if isLoadingModels {
+                appendSystemError("Still loading models — wait a moment, then pick one from the menu.")
+            } else if chatModels.isEmpty {
+                appendSystemError("No models available yet. Add a provider or API key in Settings, or download a local model from Settings → Models.")
+            } else {
+                appendSystemError("No chat model selected. Pick one from the model menu above.")
+            }
+            return nil
+        }
+        // Routing precedence: BYOK config → local model (Ollama/llama.cpp/
+        // MLX, no key at all) → Aqua.
+        let customConfig = CustomProviderStore.shared.config(owning: selectedModel)
+        let localRecord = customConfig == nil ? LocalAIManager.shared.record(withId: selectedModel) : nil
+        if let customConfig {
+            guard let customKey = CustomProviderStore.shared.apiKey(for: customConfig.id), !customKey.isEmpty else {
+                appendSystemError("No API key saved for \(customConfig.displayName). Add one in Settings → Custom Providers.")
+                return nil
+            }
+            return GenerationRouting(customConfig: customConfig, localRecord: nil, apiKey: customKey)
+        } else if localRecord != nil {
+            // Local servers don't authenticate; they ignore the header.
+            return GenerationRouting(customConfig: nil, localRecord: localRecord, apiKey: "local-no-key")
+        } else {
+            guard let aquaKey = APIKeyStore.loadAPIKey(), !aquaKey.isEmpty else {
+                appendSystemError("Add your Eaon API key in Settings → Eaon API to start chatting.")
+                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
+                return nil
+            }
+            return GenerationRouting(customConfig: nil, localRecord: nil, apiKey: aquaKey)
+        }
     }
 
     /// Fires a silent, best-effort background extraction after a turn
     /// finishes — never blocks or affects the visible chat either way. See
     /// `MemoryExtractor` for why this is a plain completion call rather
-    /// than tool-calling.
+    /// than tool-calling. Takes the finished turn's OWN messages/model
+    /// explicitly rather than reading `self.messages`/`self.selectedModel`
+    /// — by the time this runs the user may have already switched to a
+    /// different conversation (and picked a different model there), and
+    /// extraction must analyze the turn that actually just happened, not
+    /// whatever's now on screen.
     private func triggerMemoryExtractionIfNeeded(
+        in finishedMessages: [ChatMessage],
+        selectedModel modelId: String,
         customConfig: CustomProviderConfig?,
         localRecord: LocalModelRecord?,
         apiKey: String
@@ -1315,9 +1738,9 @@ class ChatViewModel {
         // `!isError` too — a turn that ended on the 3-strikes stop message
         // used to feed that error text in as "what the assistant said,"
         // polluting extraction with mechanical noise.
-        guard let lastUserIndex = messages.lastIndex(where: { $0.isUser }),
-              case let lastUser = messages[lastUserIndex].content, !lastUser.isEmpty,
-              let lastAssistant = messages.last(where: { !$0.isUser && $0.isToolResult != true && !$0.isError })?.content,
+        guard let lastUserIndex = finishedMessages.lastIndex(where: { $0.isUser }),
+              case let lastUser = finishedMessages[lastUserIndex].content, !lastUser.isEmpty,
+              let lastAssistant = finishedMessages.last(where: { !$0.isUser && $0.isToolResult != true && !$0.isError })?.content,
               !lastAssistant.isEmpty else { return }
 
         // This turn's plugin/tool results ride along ONLY with the user's
@@ -1326,7 +1749,7 @@ class ChatViewModel {
         // typed. Capped like every other request-size guard in this app.
         var toolContext: String?
         if MemoryStore.shared.isPluginLearnEnabled {
-            let turnToolResults = messages[messages.index(after: lastUserIndex)...]
+            let turnToolResults = finishedMessages[finishedMessages.index(after: lastUserIndex)...]
                 .filter { $0.isToolResult == true }
                 .map(\.content)
                 .joined(separator: "\n")
@@ -1336,7 +1759,6 @@ class ChatViewModel {
         }
 
         let aquaApiKey = (customConfig == nil && localRecord == nil) ? apiKey : nil
-        let modelId = selectedModel
         Task {
             await MemoryExtractor.run(
                 userText: lastUser,
@@ -1372,7 +1794,7 @@ class ChatViewModel {
         var aquaApiKey: String?
         if customConfig == nil, localRecord == nil {
             guard let key = APIKeyStore.loadAPIKey(), !key.isEmpty else {
-                memoryBackfillStatus = "Add your Aqua API key first, or switch to a model that already has one."
+                memoryBackfillStatus = "Add your Eaon API key first, or switch to a model that already has one."
                 return
             }
             aquaApiKey = key
@@ -1433,7 +1855,7 @@ class ChatViewModel {
             }
         } else if localRecord == nil {
             guard let key = APIKeyStore.loadAPIKey(), !key.isEmpty else {
-                memoryBackfillStatus = "Add your Aqua API key first, or switch to a model that already has one."
+                memoryBackfillStatus = "Add your Eaon API key first, or switch to a model that already has one."
                 return
             }
             aquaApiKey = key
@@ -1492,30 +1914,36 @@ class ChatViewModel {
     /// `WebSearchTool.nativeFunctionName` on its own, before it ever
     /// consults the map (see that function's doc comment).
     private static func mergedNativeTools(mode: EaonMode) -> NativeToolConfig? {
-        let inClaw = mode == .claw && DesktopControlStore.shared.isEnabled
-        let inCodingAgent = mode == .agent
+        let inAgent = mode == .agent
+        // Eaon Claw used to be its own mode holding the full device catalog
+        // (files, apps, browser) separately from Agent's coding-only subset.
+        // They're merged now: Agent always gets the coding subset, and ALSO
+        // gets the wider app/browser/AppleScript tools once the user has
+        // explicitly turned on device control in Settings — the same
+        // disclosed opt-in Claw always required, just surfaced inside the
+        // one mode instead of behind a second mode entirely. `allCases` is a
+        // strict superset of `codingTools`, so this never double-adds a tool.
+        let wideDeviceControl = inAgent && DesktopControlStore.shared.isEnabled
         var tools: [[String: Any]] = []
         var nameMap: [String: (server: String, tool: String)] = [:]
-        // Cloud plugins belong to Chat, not the device-driving modes — see
-        // `systemPromptHistory` for why loading them alongside device tools
-        // made a weaker model lose track of those tools entirely. The coding
-        // Agent gets the same focused treatment: its own file/shell tools,
-        // not a dozen unrelated cloud plugins competing for attention.
-        if !inClaw, !inCodingAgent, let mcpConfig = MCPConnectionStore.shared.nativeToolConfig {
+        // Cloud plugins belong to Chat, not Agent — see `systemPromptHistory`
+        // for why loading them alongside device tools made a weaker model
+        // lose track of those tools entirely. Agent gets its own file/shell/
+        // device tools, not a dozen unrelated cloud plugins competing for
+        // attention.
+        if !inAgent, let mcpConfig = MCPConnectionStore.shared.nativeToolConfig {
             tools += mcpConfig.tools
             nameMap = mcpConfig.nameMap
+        }
+        if ImageGenerationStore.shared.isEnabled {
+            tools.append(ImageGenerationTool.nativeDefinition)
         }
         if WebSearchStore.shared.isEnabled {
             tools.append(WebSearchTool.nativeDefinition)
         }
-        // Eaon Claw gets the full device catalog (files, apps, browser). The
-        // coding Agent gets the focused coding subset (write/run/inspect) —
-        // enough to build software on the real disk, without the
-        // app/browser-driving tools that would dilute a smaller model's
-        // focus. Chat gets neither.
-        if inClaw {
+        if wideDeviceControl {
             tools.append(contentsOf: DesktopControlTool.nativeDefinitions)
-        } else if inCodingAgent {
+        } else if inAgent {
             tools.append(contentsOf: DesktopControlTool.codingNativeDefinitions)
         }
         guard !tools.isEmpty else { return nil }
@@ -1527,26 +1955,29 @@ class ChatViewModel {
     private func streamOneAgentStep(
         customConfig: CustomProviderConfig?,
         localRecord: LocalModelRecord? = nil,
-        apiKey: String
+        apiKey: String,
+        conversationId: UUID,
+        modelId: String
     ) async -> AgentStepOutcome {
+        let generationSession = session(for: conversationId)
         let aiMsgId = UUID()
-        let selected = chatModels.first { $0.id == selectedModel }
-        messages.append(
-            ChatMessage(
+        let selected = chatModels.first { $0.id == modelId }
+        withMessages(for: conversationId) {
+            $0.append(ChatMessage(
                 id: aiMsgId,
                 content: "",
                 isUser: false,
-                modelId: selectedModel,
+                modelId: modelId,
                 modelName: selected?.name,
                 generationStartTime: Date()
-            )
-        )
-        activeTypingMessageId = aiMsgId
+            ))
+        }
+        generationSession.activeTypingMessageId = aiMsgId
 
         let typewriter = TypewriterStreamController { [weak self] displayed in
-            self?.setAssistantMessageContent(id: aiMsgId, content: displayed)
+            self?.setAssistantMessageContent(id: aiMsgId, content: displayed, for: conversationId)
         }
-        self.typewriter = typewriter
+        generationSession.typewriter = typewriter
 
         // Connected plugins + web search (if enabled) ride along as native
         // API tools (the calling mechanism hosted models are trained on) —
@@ -1557,38 +1988,38 @@ class ChatViewModel {
         var outcome: AgentStepOutcome
         do {
             if let customConfig {
-                try await streamCustomCompletion(config: customConfig, apiKey: apiKey, typewriter: typewriter, nativeTools: nativeTools)
+                try await streamCustomCompletion(config: customConfig, apiKey: apiKey, modelId: modelId, conversationId: conversationId, typewriter: typewriter, nativeTools: nativeTools)
             } else if let localRecord {
-                try await streamLocalCompletion(record: localRecord, aiMsgId: aiMsgId, typewriter: typewriter, nativeTools: nativeTools)
+                try await streamLocalCompletion(record: localRecord, aiMsgId: aiMsgId, conversationId: conversationId, typewriter: typewriter, nativeTools: nativeTools)
             } else {
-                try await streamCompletion(apiKey: apiKey, aiMessageId: aiMsgId, typewriter: typewriter, nativeTools: nativeTools)
+                try await streamCompletion(apiKey: apiKey, aiMessageId: aiMsgId, modelId: modelId, conversationId: conversationId, typewriter: typewriter, nativeTools: nativeTools)
             }
             typewriter.markStreamFinished()
             await typewriter.waitUntilCaughtUp()
-            finalizeGeneration(id: aiMsgId)
-            saveMessages()
-            outcome = .completed(id: aiMsgId, text: messages.first(where: { $0.id == aiMsgId })?.content ?? "")
+            finalizeGeneration(id: aiMsgId, modelId: modelId, for: conversationId)
+            persistGeneration(for: conversationId)
+            outcome = .completed(id: aiMsgId, text: withMessages(for: conversationId, { $0.first(where: { $0.id == aiMsgId })?.content }).flatMap { $0 } ?? "")
         } catch is CancellationError {
             typewriter.markStreamFinished()
             await typewriter.waitUntilCaughtUp()
-            finalizeGeneration(id: aiMsgId)
-            saveMessages()
+            finalizeGeneration(id: aiMsgId, modelId: modelId, for: conversationId)
+            persistGeneration(for: conversationId)
             outcome = .cancelled
         } catch let error as URLError where error.code == .cancelled {
             typewriter.markStreamFinished()
             await typewriter.waitUntilCaughtUp()
-            finalizeGeneration(id: aiMsgId)
-            saveMessages()
+            finalizeGeneration(id: aiMsgId, modelId: modelId, for: conversationId)
+            persistGeneration(for: conversationId)
             outcome = .cancelled
         } catch {
             typewriter.cancel()
-            markError(id: aiMsgId, text: error.localizedDescription)
+            markError(id: aiMsgId, text: error.localizedDescription, for: conversationId)
             outcome = .failed
         }
 
-        self.typewriter = nil
-        activeTypingMessageId = nil
-        loadingStatusText = nil
+        generationSession.typewriter = nil
+        generationSession.activeTypingMessageId = nil
+        generationSession.loadingStatusText = nil
         return outcome
     }
 
@@ -1596,6 +2027,11 @@ class ChatViewModel {
         let results: String
         /// Non-nil only when a run failed — drives the repeat-error stop.
         let failureSignature: String?
+        /// A generated image, if this run's tool calls included one —
+        /// attached to the same tool-result message so it renders inline
+        /// in the transcript, exactly like the standalone image-generation
+        /// path (`sendImageGenerationMessage`).
+        var attachments: [MessageAttachment] = []
     }
 
     /// Mirrors the `read` case's own 12,000-character cap just below —
@@ -1658,7 +2094,7 @@ class ChatViewModel {
     /// working snapshot that replays the reply's own events in order — so
     /// each tool sees exactly the file state the model had produced by that
     /// point. Returns nil when the reply requested nothing (loop ends).
-    private func executeAgentTools(inReplyText replyText: String) async -> AgentToolRun? {
+    private func executeAgentTools(inReplyText replyText: String, conversationId: UUID) async -> AgentToolRun? {
         // assumeFinal: this text is DONE streaming, so a trailing block
         // with no closing fence is a model that stopped mid-fence, not a
         // stream still writing — execute it rather than dropping it.
@@ -1689,9 +2125,9 @@ class ChatViewModel {
             // to hand-type "continue" after every step. Bounce it back
             // instead — the agentic contract is act or conclude, never just
             // think — with a signature so three thinking-only turns in a
-            // row stop cleanly. Agent/Claw only: plain Chat has no loop to
-            // keep alive.
-            if currentMode == .agent || currentMode == .claw {
+            // row stop cleanly. Agent only: plain Chat has no loop to keep
+            // alive.
+            if currentMode == .agent {
                 // Complete think spans are already gone from visibleReply;
                 // any "<think" still present is an unclosed span trailing
                 // to the end — ignore it for the emptiness check too.
@@ -1701,9 +2137,7 @@ class ChatViewModel {
                 }
                 if checkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let example = currentMode == .agent
-                        ? "```eaon:computer tool=\"write_file\"\n{\"path\": \"~/<project>/index.html\", \"content\": \"<!doctype html>\\n…the complete file…\"}\n```"
-                        : "```eaon:computer tool=\"list_directory\"\n{\"path\": \"~/Downloads\"}\n```"
+                    let example = "```eaon:computer tool=\"write_file\"\n{\"path\": \"~/<project>/index.html\", \"content\": \"<!doctype html>\\n…the complete file…\"}\n```"
                     return AgentToolRun(
                         results: "[Tool results — automated, not written by the user]\n\n### tool call\nERROR: your reply was only internal thinking — it ended with no visible text and no tool call, so NOTHING happened. Do not think again; ACT. Emit the next tool call now, as a fence at the start of its own line:\n\(example)\nAfter your reasoning you must always either call a tool or, when the task is finished, give the user a short plain-language answer.",
                         failureSignature: "thinking-only-turn"
@@ -1718,7 +2152,7 @@ class ChatViewModel {
             // disk from this, so say so before the loop just quietly ends.
             if currentMode == .agent, Self.containsBareCodeFence(visibleReply) {
                 return AgentToolRun(
-                    results: "[Tool results — automated, not written by the user]\n\n### tool call\nERROR: no tool was called, so nothing was created — a code block in the chat doesn't save to disk. If that was meant to be a file, write it for real:\n```eaon:computer tool=\"write_file\"\n{\"path\": \"~/project/main.py\", \"content\": \"print('hi')\\n\"}\n```\nAvailable tools: \(DesktopTool.codingTools.map(\.rawValue).joined(separator: ", ")).",
+                    results: "[Tool results — automated, not written by the user]\n\n### tool call\nERROR: no tool was called, so nothing was created — a code block in the chat doesn't save to disk. If that was meant to be a file, write it for real:\n```eaon:computer tool=\"write_file\"\n{\"path\": \"~/project/main.py\", \"content\": \"print('hi')\\n\"}\n```\nAvailable tools: \(agentAvailableTools.map(\.rawValue).joined(separator: ", ")).",
                     failureSignature: "agent-code-no-tool-call"
                 )
             }
@@ -1727,15 +2161,15 @@ class ChatViewModel {
             // Returning nil here would end the loop with no reply and no
             // error — the model must instead be told the call didn't
             // happen, so it can re-emit it correctly. The re-emit example
-            // MUST match the mode's actual tools: telling a coding-Agent or
-            // Claw model to use the `eaon:mcp server="<server id>"` form
-            // (the old hardcoded text) made it copy that literal placeholder
-            // and spiral into "<server id> isn't a connected service." A
-            // real failureSignature is set now too, so an identical parse
+            // MUST match the mode's actual tools: telling an Agent model to
+            // use the `eaon:mcp server="<server id>"` form (the old
+            // hardcoded text) made it copy that literal placeholder and
+            // spiral into "<server id> isn't a connected service." A real
+            // failureSignature is set now too, so an identical parse
             // failure three times running stops the loop instead of burning
             // steps until the gateway 502s.
             if visibleReply.contains("```eaon:") || visibleReply.contains("```aqua:") {
-                let usesComputerTools = currentMode == .agent || currentMode == .claw
+                let usesComputerTools = currentMode == .agent
                 let example = usesComputerTools
                     ? "```eaon:computer tool=\"write_file\"\n{\"path\": \"~/project/main.py\", \"content\": \"print('hi')\\n\"}\n```"
                     : "```eaon:mcp server=\"<server id>\" tool=\"<tool name>\"\n{\"arg\": \"value\"}\n```"
@@ -1743,7 +2177,7 @@ class ChatViewModel {
                 // to it, this hint itself modeled the exact
                 // text-on-the-fence-line mistake it was trying to correct.
                 let toolsHint = usesComputerTools
-                    ? "\nYour tools are called with `tool=\"<name>\"` on the fence line and a JSON body. Available tools: \(DesktopTool.codingTools.map(\.rawValue).joined(separator: ", ")). The opening ```eaon:computer must START its own line (nothing else before it on that line), the closing ``` goes on its own line, and every newline inside a JSON string is written as \\n."
+                    ? "\nYour tools are called with `tool=\"<name>\"` on the fence line and a JSON body. Available tools: \(agentAvailableTools.map(\.rawValue).joined(separator: ", ")). The opening ```eaon:computer must START its own line (nothing else before it on that line), the closing ``` goes on its own line, and every newline inside a JSON string is written as \\n."
                     : ""
                 return AgentToolRun(
                     results: "[Tool results — automated, not written by the user]\n\n### tool call\nERROR: a tool block in your reply couldn't be parsed, so nothing was executed. Re-emit it EXACTLY like this, with the closing ``` fence on its own line:\n\(example)\(toolsHint)",
@@ -1757,13 +2191,15 @@ class ChatViewModel {
         // the last message right now).
         var ordered: [String] = []
         var byPath: [String: WorkspaceFile] = [:]
-        for file in WorkspaceParser.files(fromMessages: Array(messages.dropLast())) {
+        let conversationMessages = withMessages(for: conversationId, { $0 }) ?? []
+        for file in WorkspaceParser.files(fromMessages: Array(conversationMessages.dropLast())) {
             ordered.append(file.path)
             byPath[file.path] = file
         }
 
         var sections: [String] = []
         var failureSignature: String?
+        var imageAttachments: [MessageAttachment] = []
 
         for event in events {
             if Task.isCancelled { break }
@@ -1792,13 +2228,13 @@ class ChatViewModel {
                     WorkspaceRunner.shared.note("✗ \(file.path) — not saved (no absolute path)\n", kind: .stderr)
                     continue
                 }
-                guard await confirmDesktopCallIfNeeded(tool: .writeFile, arguments: ["path": file.path, "content": file.content]) else {
+                guard await confirmDesktopCallIfNeeded(tool: .writeFile, arguments: ["path": file.path, "content": file.content], for: conversationId) else {
                     sections.append("### \(file.path)\nSkipped — you didn't allow this action.")
                     WorkspaceRunner.shared.note("✗ computer: Write file — not allowed\n", kind: .stderr)
                     continue
                 }
-                agentActivityText = "Running \(DesktopTool.writeFile.displayName)…"
-                defer { agentActivityText = nil }
+                session(for: conversationId).agentActivityText = "Running \(DesktopTool.writeFile.displayName)…"
+                defer { session(for: conversationId).agentActivityText = nil }
                 let writeResult = await DesktopControlService.execute(tool: .writeFile, arguments: ["path": file.path, "content": file.content])
                 if writeResult.isError {
                     sections.append("### \(file.path)\nERROR:\n\(Self.boundedToolResultText(writeResult.text))")
@@ -1841,18 +2277,18 @@ class ChatViewModel {
                     sections.append("### run \(entry.path)\nERROR: can't run this file type. Runnable: .py .js .swift .rb .php .sh .zsh .pl .lua .go — websites preview automatically instead of running.")
                     continue
                 }
-                guard await confirmRunIfNeeded(path: entry.path) else {
+                guard await confirmRunIfNeeded(path: entry.path, for: conversationId) else {
                     sections.append("### run \(entry.path)\nSkipped — you didn't allow running generated code in this conversation.")
                     WorkspaceRunner.shared.note("✗ run \(entry.path) — not allowed\n", kind: .stderr)
                     continue
                 }
-                agentActivityText = "Running \(entry.path)…"
-                defer { agentActivityText = nil }
+                session(for: conversationId).agentActivityText = "Running \(entry.path)…"
+                defer { session(for: conversationId).agentActivityText = nil }
                 let snapshot = ordered.compactMap { byPath[$0] }
                 let outcome = await WorkspaceRunner.shared.agentRun(
                     files: snapshot,
                     entry: entry,
-                    workspaceKey: currentConversationId?.uuidString ?? "draft",
+                    workspaceKey: conversationId.uuidString,
                     timeout: 60
                 )
                 // Tail the output so a chatty program can't blow up the
@@ -1910,13 +2346,13 @@ class ChatViewModel {
                     sections.append("### \(tool)\nERROR: missing required argument\(missing.count == 1 ? "" : "s"): \(missing.joined(separator: ", ")) — nothing was called.\n\(toolSpec.detailedSpec)")
                     continue
                 }
-                guard await confirmMCPCallIfNeeded(server: server, tool: tool, argumentsJSON: argumentsJSON) else {
+                guard await confirmMCPCallIfNeeded(server: server, tool: tool, argumentsJSON: argumentsJSON, for: conversationId) else {
                     sections.append("### \(tool)\nSkipped — you didn't allow this action.")
                     WorkspaceRunner.shared.note("✗ \(server.displayName): \(tool) — not allowed\n", kind: .stderr)
                     continue
                 }
-                agentActivityText = "Running \(server.displayName): \(tool)…"
-                defer { agentActivityText = nil }
+                session(for: conversationId).agentActivityText = "Running \(server.displayName): \(tool)…"
+                defer { session(for: conversationId).agentActivityText = nil }
                 do {
                     let result = try await MCPConnectionStore.shared.callTool(server: serverId, name: tool, arguments: arguments)
                     if result.isError {
@@ -1957,8 +2393,8 @@ class ChatViewModel {
                     sections.append("### web search\nERROR: missing a non-empty \"query\" string — nothing was searched. The block body must be JSON like {\"query\": \"...\"}")
                     continue
                 }
-                agentActivityText = "Searching the web for \"\(query)\"…"
-                defer { agentActivityText = nil }
+                session(for: conversationId).agentActivityText = "Searching the web for \"\(query)\"…"
+                defer { session(for: conversationId).agentActivityText = nil }
                 do {
                     let results = try await WebSearchService.search(query: query)
                     sections.append("### web search: \(query)\n\(Self.boundedToolResultText(WebSearchService.formattedResultsForModel(results)))")
@@ -1968,25 +2404,47 @@ class ChatViewModel {
                     WorkspaceRunner.shared.note("✗ search failed: \(query) — \(error.localizedDescription)\n", kind: .stderr)
                 }
 
-            case .computerCall(let toolName, let argumentsJSON):
-                // Same belt-and-suspenders as web search: the teaching block
-                // and native definitions are withheld outside the modes that
-                // use them, but a model can still imitate the fence from
-                // history — refuse rather than act. Device/coding calls run in
-                // exactly two places: Eaon Claw (full catalog, capability
-                // enabled) and the coding Agent (its focused subset). A call
-                // replayed while the user is in plain Chat can't fire.
-                let inClawExec = currentMode == .claw && DesktopControlStore.shared.isEnabled
-                let inCodingAgentExec = currentMode == .agent
-                guard inClawExec || inCodingAgentExec else {
-                    sections.append("### computer\nERROR: this tool only runs in Eaon Claw (once enabled) or the coding Agent — nothing was done.")
+            case .imageGeneration(let argumentsJSON):
+                guard ImageGenerationStore.shared.isEnabled else {
+                    sections.append("### image generation\nERROR: Image generation is turned off — nothing was generated.")
                     continue
                 }
-                // In the coding Agent, keep the model on its own tools — a
-                // replayed app/browser-driving fence from a past Claw chat
-                // shouldn't execute here.
-                if inCodingAgentExec, let toolName, let t = DesktopControlTool.tool(named: toolName), !DesktopTool.codingTools.contains(t) {
-                    sections.append("### \(toolName)\nERROR: \"\(toolName)\" isn't one of the coding Agent's tools — use \(DesktopTool.codingTools.map(\.rawValue).joined(separator: ", ")).")
+                guard let arguments = Self.parseJSONObject(argumentsJSON),
+                      let prompt = (arguments["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !prompt.isEmpty else {
+                    sections.append("### image generation\nERROR: missing a non-empty \"prompt\" string — nothing was generated. The block body must be JSON like {\"prompt\": \"...\"}")
+                    continue
+                }
+                session(for: conversationId).agentActivityText = "Generating image…"
+                defer { session(for: conversationId).agentActivityText = nil }
+                do {
+                    let result = try await ImageGenerationTool.generate(prompt: prompt, apiKey: APIKeyStore.loadAPIKey())
+                    let attachment = try AttachmentStore.importImageData(result.data, fileName: result.suggestedFileName)
+                    imageAttachments.append(attachment)
+                    sections.append("### image generation: \(prompt)\nOK: image generated and shown to the user.")
+                    WorkspaceRunner.shared.note("✓ generated image: \(prompt)\n", kind: .status)
+                } catch {
+                    sections.append("### image generation: \(prompt)\nERROR: \(error.localizedDescription)")
+                    WorkspaceRunner.shared.note("✗ image generation failed: \(prompt) — \(error.localizedDescription)\n", kind: .stderr)
+                }
+
+            case .computerCall(let toolName, let argumentsJSON):
+                // Same belt-and-suspenders as web search: the teaching block
+                // and native definitions are withheld outside Agent mode,
+                // but a model can still imitate the fence from history —
+                // refuse rather than act. A call replayed while the user is
+                // in plain Chat can't fire.
+                let inAgentExec = currentMode == .agent
+                guard inAgentExec else {
+                    sections.append("### computer\nERROR: this tool only runs in Agent mode — nothing was done.")
+                    continue
+                }
+                // Keep the model on the tools it's ACTUALLY been offered —
+                // e.g. a replayed app/browser-driving fence from before
+                // device control was turned on in Settings shouldn't
+                // execute just because it's sitting in history.
+                if let toolName, let t = DesktopControlTool.tool(named: toolName), !agentAvailableTools.contains(t) {
+                    sections.append("### \(toolName)\nERROR: \"\(toolName)\" isn't one of your current tools — use \(agentAvailableTools.map(\.rawValue).joined(separator: ", ")).")
                     continue
                 }
                 guard let toolName else {
@@ -2016,13 +2474,34 @@ class ChatViewModel {
                     sections.append("### \(toolName)\nERROR: missing required argument\(missingArgs.count == 1 ? "" : "s"): \(missingArgs.joined(separator: ", ")) — nothing was done.")
                     continue
                 }
-                guard await confirmDesktopCallIfNeeded(tool: tool, arguments: arguments) else {
+                // ask_user never goes near the confirmation gate or the
+                // system-action executor: the dialog itself IS the user
+                // interaction, and its answer is the tool result.
+                if tool == .askUser {
+                    let question = (arguments["question"] as? String) ?? ""
+                    let options = ((arguments["options"] as? [Any]) ?? []).compactMap { $0 as? String }
+                    session(for: conversationId).agentActivityText = "Waiting for your answer…"
+                    let answer = await presentAgentQuestion(
+                        PendingAgentQuestion(question: question, options: Array(options.prefix(4))),
+                        for: conversationId
+                    )
+                    session(for: conversationId).agentActivityText = nil
+                    if let answer, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        sections.append("### ask_user\nThe user answered: \(answer)")
+                        WorkspaceRunner.shared.note("✓ asked: answered\n", kind: .status)
+                    } else {
+                        sections.append("### ask_user\nThe user dismissed the question without answering — proceed with your best judgment and say what you assumed.")
+                        WorkspaceRunner.shared.note("✗ asked: dismissed\n", kind: .stderr)
+                    }
+                    continue
+                }
+                guard await confirmDesktopCallIfNeeded(tool: tool, arguments: arguments, for: conversationId) else {
                     sections.append("### \(toolName)\nSkipped — you didn't allow this action.")
                     WorkspaceRunner.shared.note("✗ computer: \(tool.displayName) — not allowed\n", kind: .stderr)
                     continue
                 }
-                agentActivityText = "Running \(tool.displayName)…"
-                defer { agentActivityText = nil }
+                session(for: conversationId).agentActivityText = "Running \(tool.displayName)…"
+                defer { session(for: conversationId).agentActivityText = nil }
                 let desktopResult = await DesktopControlService.execute(tool: tool, arguments: arguments)
                 if desktopResult.isError {
                     sections.append("### \(toolName)\nERROR:\n\(Self.boundedToolResultText(desktopResult.text))")
@@ -2037,7 +2516,8 @@ class ChatViewModel {
         guard !sections.isEmpty else { return nil }
         return AgentToolRun(
             results: "[Tool results — automated, not written by the user]\n\n" + sections.joined(separator: "\n\n"),
-            failureSignature: failureSignature
+            failureSignature: failureSignature,
+            attachments: imageAttachments
         )
     }
 
@@ -2046,16 +2526,65 @@ class ChatViewModel {
     /// one, then remembered facts (Settings → Memory) if that's turned on
     /// and there are any. Always the user's own words or things Eaon
     /// itself learned from them — never a hardcoded system prompt.
-    private var systemPromptHistory: [HistoryTurn] {
-        var entries: [HistoryTurn] = []
-        let inClaw = currentMode == .claw && DesktopControlStore.shared.isEnabled
+    /// Rough parameter count parsed from a model id/name — "Qwen3-4B-GGUF"
+    /// → 4, "llama3.1:8b" → 8, "Llama-3.1-70B" → 70 (last match wins, so
+    /// the version number "3.1" never shadows the real size). Quant tags
+    /// like "Q4_K_M" don't match (the digit must be immediately followed
+    /// by a `b`). nil when the name simply doesn't say — treated as "not
+    /// known small," never guessed. Known blind spot: MoE names like
+    /// "8x7b" parse as 7 despite the real total being much larger — rare
+    /// on the consumer hardware this gate exists for, accepted.
+    static func parameterBillions(in modelId: String) -> Double? {
+        guard let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)\s*[bB]\b"#) else { return nil }
+        let range = NSRange(modelId.startIndex..., in: modelId)
+        guard let match = regex.matches(in: modelId, range: range).last,
+              let valueRange = Range(match.range(at: 1), in: modelId) else { return nil }
+        return Double(modelId[valueRange])
+    }
 
-        // Eaon Claw's identity leads everything else. Placed first so a model
-        // anchors on "I am an agent that controls this Mac" before it reads
-        // any tool catalog — without it, a weaker model swamped by tools was
-        // observed flatly denying it had any machine/browser access at all.
-        if inClaw {
-            entries.append(HistoryTurn(role: "system", content: Self.clawIdentityPreamble))
+    /// Whether this model gets the compact system prompt: local, and small
+    /// enough (≤ 7B parameters) that the full instruction stack is
+    /// actively harmful. Observed live with Qwen3-4B: sent the whole
+    /// workspace + plugin-catalog briefing, it answered a bare "hi" by
+    /// RECITING the instructions back ("The user has provided the code for
+    /// the eaon:mcp tool… 1. Create or overwrite a file…") — the
+    /// instructions were most of its context, so it decided they were the
+    /// topic. Models that size can't use those features reliably anyway
+    /// (they mangle the fence syntax), so dropping the teaching text costs
+    /// little and gives back a model that actually answers. Cloud models
+    /// never qualify regardless of name.
+    static func usesCompactPrompt(modelId: String) -> Bool {
+        guard LocalAIManager.shared.owns(modelId) else { return false }
+        guard let billions = parameterBillions(in: modelId) else { return false }
+        return billions <= 7
+    }
+
+    /// `conversationId` — needed only to find the turn actually being
+    /// responded to, so the memory briefing can be scored against it
+    /// instead of dumped in full regardless of relevance (see
+    /// `MemoryStore.promptBlock(relevantTo:)`). Looked up via
+    /// `withMessages`, not `self.messages`, so a background-generating
+    /// conversation the user has since switched away from still scores
+    /// against ITS OWN latest message, not whatever's currently on screen.
+    /// `modelId` — the model this request is actually going to, so the
+    /// heavyweight instruction blocks can be withheld from small local
+    /// models (see `usesCompactPrompt`).
+    private func systemPromptHistory(for conversationId: UUID, modelId: String) -> [HistoryTurn] {
+        let compactPrompt = Self.usesCompactPrompt(modelId: modelId)
+        var entries: [HistoryTurn] = []
+        // Eaon Claw used to be a separate mode for this; it's folded into
+        // Agent now — the same disclosed, off-by-default opt-in
+        // (`DesktopControlStore.isEnabled`), just widening Agent's own
+        // remit instead of switching to a second mode entirely.
+        let wideDeviceControl = currentMode == .agent && DesktopControlStore.shared.isEnabled
+
+        // The wider-device-control identity leads everything else. Placed
+        // first so a model anchors on "I also control this whole Mac" before
+        // it reads any tool catalog — without it, a weaker model swamped by
+        // tools was observed flatly denying it had any machine/browser
+        // access at all.
+        if wideDeviceControl {
+            entries.append(HistoryTurn(role: "system", content: Self.wideDeviceControlPreamble))
         }
 
         let trimmed = customInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2063,13 +2592,14 @@ class ChatViewModel {
             entries.append(HistoryTurn(role: "system", content: trimmed))
         }
 
-        // The memory briefing — facts plus recent dated happenings, with
-        // guidance to use them like a person would (follow up on how
-        // something went) rather than recite them. Composed in
-        // `MemoryStore.promptBlock`, which also handles the caps and the
-        // 30-day event window so old happenings age out of prompts
-        // naturally.
-        if let memoryBlock = MemoryStore.shared.promptBlock() {
+        // The memory briefing — facts relevant to what's actually being
+        // asked (not the whole store — see `promptBlock`'s own doc for why
+        // that used to derail small models on something as plain as "hi"),
+        // plus recent dated happenings, with guidance to use them like a
+        // person would (follow up on how something went) rather than
+        // recite them.
+        let latestUserText = (withMessages(for: conversationId, { $0.last(where: \.isUser)?.content }) ?? nil) ?? ""
+        if let memoryBlock = MemoryStore.shared.promptBlock(relevantTo: latestUserText) {
             entries.append(HistoryTurn(role: "system", content: memoryBlock))
         }
 
@@ -2083,53 +2613,72 @@ class ChatViewModel {
         // catalog just below so a model anchors on "I can write real code
         // right here" before it reads about GitHub/Vercel/etc. — the same
         // primacy lesson already learned for Claw's identity preamble.
-        if currentMode == .chat {
+        // `!compactPrompt`: this block (plus the plugin catalog below) is
+        // exactly what a small local model was observed reciting back at
+        // the user instead of answering — see `usesCompactPrompt`.
+        if currentMode == .chat, !compactPrompt {
             entries.append(HistoryTurn(role: "system", content: WorkspaceParser.systemInstruction))
         }
 
         // Connected cloud plugins (GitHub, Notion, …) belong to Chat ONLY —
-        // not the coding Agent, not Eaon Claw. Both of those are about *this
-        // Mac*, and their tool sets are withheld from the native tools array
-        // there (see `mergedNativeTools`); sending the plugin *catalog* in
-        // the prompt anyway was a real bug — the model was told "you have
-        // GitHub, Cloudflare, Supabase, Notion, Vercel" while those tools
-        // weren't actually offered, and the catalog's bulk buried the coding
+        // not Agent, which is about *this Mac*, and whose tool set is
+        // withheld from the native tools array there (see
+        // `mergedNativeTools`); sending the plugin *catalog* in the prompt
+        // anyway was a real bug — the model was told "you have GitHub,
+        // Cloudflare, Supabase, Notion, Vercel" while those tools weren't
+        // actually offered, and the catalog's bulk buried the coding
         // instructions so thoroughly that a model (GLM) decided the whole
         // system prompt was just "setup messages" with no real task in it.
-        // Keeping Agent's prompt to coding tools + web search, and Claw's to
-        // device + browser + web search, is what keeps them on task.
-        if currentMode == .chat, let mcpInstruction = MCPConnectionStore.shared.agentInstructionBlock {
+        // Keeping Agent's prompt to its own device/coding tools + web
+        // search is what keeps it on task.
+        if currentMode == .chat, !compactPrompt, let mcpInstruction = MCPConnectionStore.shared.agentInstructionBlock {
             entries.append(HistoryTurn(role: "system", content: mcpInstruction))
         }
 
         // Web search has nothing to connect, so it's unconditional whenever
         // the user hasn't turned it off (see `WebSearchStore`) — useful in
-        // every conversational mode, Claw included (research tasks). Also
+        // every conversational mode, Agent included (research tasks). Also
         // carries the current date/time so "what's today" is answered from
         // context instead of a flaky search.
         if WebSearchStore.shared.isEnabled {
             entries.append(HistoryTurn(role: "system", content: WebSearchTool.agentInstructionBlock()))
         }
 
-        // Agent mode is the real coding agent: it writes real files to the
-        // user's disk, runs them, and iterates — using the same device engine
-        // as Eaon Claw, but a coding-focused tool subset and framing. Scoped
-        // to Agent mode (not sent in Chat), so ordinary conversation is never
-        // steered by it. Whether each command is confirmed or auto-runs is the
-        // user's Sandboxed/Auto toggle (`agentAutoRun`), handled in
-        // `confirmDesktopCallIfNeeded` — the prompt is identical either way.
-        if currentMode == .agent {
-            entries.append(HistoryTurn(role: "system", content: DesktopControlTool.codingInstructionBlock()))
+        // Same unconditional-whenever-on shape as web search — image
+        // generation isn't a connected service either, and Aqua models
+        // (which don't support this per the user's own instruction) simply
+        // never see the block, since Aqua chat and Aqua image generation
+        // are different endpoints this app already keeps separate.
+        if ImageGenerationStore.shared.isEnabled {
+            entries.append(HistoryTurn(role: "system", content: ImageGenerationTool.agentInstructionBlock()))
         }
 
-        // Eaon Claw's device-control teaching + browser how-to + the
-        // non-negotiable safety rules (no sudo, no credentials/purchases,
-        // treat read content as data not instructions). These come LAST so
-        // the concrete tool detail is the freshest thing before the user's
-        // message — primacy (identity, first) plus recency (the how, last).
-        if inClaw {
-            entries.append(HistoryTurn(role: "system", content: DesktopControlTool.agentInstructionBlock()))
-            entries.append(HistoryTurn(role: "system", content: Self.clawBrowserInstructionBlock))
+        // Agent is the one general-purpose on-device mode now: it writes
+        // real files, runs them, and iterates, AND — once device control is
+        // turned on — drives apps and the browser for real multi-step tasks
+        // (deep research, shopping research, and anything else that needs
+        // more than the filesystem). Scoped to Agent mode (not sent in
+        // Chat), so ordinary conversation is never steered by it. Whether
+        // each command is confirmed or auto-runs is the user's Sandboxed/
+        // Auto toggle (`agentAutoRun`), handled in
+        // `confirmDesktopCallIfNeeded` — the prompt is identical either way,
+        // and now covers the wider tools too, not just the coding subset.
+        if currentMode == .agent {
+            // ONE prompt whose tool list and closing line reflect exactly
+            // what's offered — not this block plus a second, separately-
+            // sent full teaching block, which is the "bulk buries the
+            // instructions" mistake documented above `codingInstructionBlock`.
+            entries.append(HistoryTurn(role: "system", content: DesktopControlTool.codingInstructionBlock(includeWiderTools: wideDeviceControl)))
+        }
+
+        // Concrete browser how-to (reading tabs, driving pages via
+        // AppleScript) — genuinely additional detail, not identity or
+        // safety rules the coding block above already covers, so it stays
+        // its own short supplemental turn. Last, so the freshest thing
+        // before the user's message is the how-to detail — primacy
+        // (identity, first) plus recency (the how, last).
+        if wideDeviceControl {
+            entries.append(HistoryTurn(role: "system", content: Self.wideDeviceControlBrowserInstructionBlock))
         }
 
         // A one-off `/skill-name` invocation for the message this request
@@ -2149,26 +2698,27 @@ class ChatViewModel {
         return entries
     }
 
-    /// Eaon Claw's opening system message — forceful and first. It exists
-    /// specifically to stop a model from mistaking itself for a cloud chatbot
-    /// with no machine access (observed live: a model in Claw denied it could
-    /// see the browser and listed only its cloud plugins). States the real
-    /// capability plainly and tells the model to reach for a tool rather than
-    /// refuse when asked about the screen, browser, or files.
-    private static let clawIdentityPreamble = """
-    You are Eaon Claw, an AI agent running directly on the user's Mac. You control this computer and its web browser through real tools — this is genuine local access, not a cloud assistant's limitations. You can read and organize files, run shell commands, open and drive apps, and control the browser: open pages, read what's on the screen, click, scroll, and fill forms.
+    /// Agent's wider-device-control opening system message (formerly Eaon
+    /// Claw's own identity, now folded into Agent) — forceful and first. It
+    /// exists specifically to stop a model from mistaking itself for a cloud
+    /// chatbot with no machine access (observed live: a model denied it
+    /// could see the browser and listed only its cloud plugins). States the
+    /// real capability plainly and tells the model to reach for a tool
+    /// rather than refuse when asked about the screen, browser, or files.
+    private static let wideDeviceControlPreamble = """
+    You also have full control of this Mac and its web browser through real tools, not just its files and shell — this is genuine local access, not a cloud assistant's limitations. You can open and drive apps, and control the browser: open pages, read what's on the screen, click, scroll, and fill forms.
 
     Never tell the user you lack access to their machine, screen, browser, or files — you have that access. When they ask what's on their screen, what they're watching, what's open, or about a file, USE your tools to find out: read the browser with run_applescript, inspect the filesystem with list_directory or run_shell. Look first, then answer from what you actually observed — don't guess, and don't refuse.
     """
 
-    /// Extra teaching for Eaon Claw specifically: how to drive the browser
+    /// Extra teaching for driving the browser specifically — how to drive it
     /// through the tools it already has. `run_applescript` can control Safari
     /// and Chrome (navigate, read the page, click, fill forms via JavaScript)
     /// and `open_url` opens a link in the default browser — but a model, and
     /// especially a smaller local one, won't reliably reach for AppleScript
     /// unless shown concretely how. Concrete, copy-pasteable examples make
     /// browser tasks actually work instead of the model guessing.
-    private static let clawBrowserInstructionBlock = """
+    private static let wideDeviceControlBrowserInstructionBlock = """
     Driving the browser is part of what you do, and most of it needs NO special setup.
 
     TO SEE WHAT'S OPEN — what page the user is on, what they're watching, which tabs are open — read the tab title and URL. This is the first thing to reach for, and it works with only the standard one-time permission (no developer settings). Use `run_applescript`:
@@ -2217,9 +2767,9 @@ class ChatViewModel {
     /// without vision. Shared by all three routing paths so the vision
     /// badge shown in the model picker and what actually gets sent never
     /// disagree with each other.
-    private func historyTurn(for message: ChatMessage) -> HistoryTurn {
+    private func historyTurn(for message: ChatMessage, modelId: String) -> HistoryTurn {
         let role = (message.isUser || message.isToolResult == true) ? "user" : "assistant"
-        guard !message.attachments.isEmpty, ModelCatalog.supportsVision(for: selectedModel) else {
+        guard !message.attachments.isEmpty, ModelCatalog.supportsVision(for: modelId) else {
             return HistoryTurn(role: role, content: apiContent(for: message, sentImages: []))
         }
 
@@ -2237,18 +2787,22 @@ class ChatViewModel {
     private func streamCustomCompletion(
         config: CustomProviderConfig,
         apiKey: String,
+        modelId: String,
+        conversationId: UUID,
         typewriter: TypewriterStreamController,
         nativeTools: NativeToolConfig? = nil
     ) async throws {
-        var history: [HistoryTurn] = systemPromptHistory
-        history += messages.dropLast().map { historyTurn(for: $0) }
+        var history: [HistoryTurn] = systemPromptHistory(for: conversationId, modelId: modelId)
+        let priorMessages = withMessages(for: conversationId, { $0 }) ?? []
+        history += priorMessages.dropLast().map { historyTurn(for: $0, modelId: modelId) }
         try await CustomProviderAPIService().streamCompletion(
             config: config,
             apiKey: apiKey,
-            modelId: selectedModel,
+            modelId: modelId,
             history: history,
             typewriter: typewriter,
-            nativeTools: nativeTools
+            nativeTools: nativeTools,
+            sampling: ModelParametersStore.shared.effectiveParameters
         )
     }
 
@@ -2257,7 +2811,8 @@ class ChatViewModel {
     /// model), then streams over the same OpenAI-compatible wire code the
     /// BYOK path uses — local servers speak exactly that dialect (verified
     /// live against both Ollama and llama-server on this machine).
-    private func streamLocalCompletion(record: LocalModelRecord, aiMsgId: UUID, typewriter: TypewriterStreamController, nativeTools: NativeToolConfig? = nil) async throws {
+    private func streamLocalCompletion(record: LocalModelRecord, aiMsgId: UUID, conversationId: UUID, typewriter: TypewriterStreamController, nativeTools: NativeToolConfig? = nil) async throws {
+        let generationSession = session(for: conversationId)
         // A real pre-flight check, not a guess: Ollama runs independent of
         // this app, so it merely being reachable says nothing about whether
         // *this* model is already resident — only `/api/ps` does. llama.cpp/
@@ -2277,7 +2832,7 @@ class ChatViewModel {
         // text here, since its server being reachable at all says nothing
         // about this specific model still needing to load.
         if !wasAlreadyWarm, record.backend == .ollama {
-            loadingStatusText = "Loading \(record.displayName) into memory — first response can take a few seconds…"
+            generationSession.loadingStatusText = "Loading \(record.displayName) into memory — first response can take a few seconds…"
         }
 
         let loadStart = Date()
@@ -2289,13 +2844,22 @@ class ChatViewModel {
         // this same span can't be used the same way — handled below.
         let llamaCppMlxLoadDuration = Date().timeIntervalSince(loadStart)
 
-        var history: [HistoryTurn] = systemPromptHistory
-        history += messages.dropLast().map { historyTurn(for: $0) }
+        var history: [HistoryTurn] = systemPromptHistory(for: conversationId, modelId: record.id)
+        let priorMessages = withMessages(for: conversationId, { $0 }) ?? []
+        history += priorMessages.dropLast().map { historyTurn(for: $0, modelId: record.requestModelId) }
         // Local servers render the model's own embedded chat template,
         // which is frequently strict about history shape — see
         // `flattenedForStrictChatTemplates`' own doc for the live failure
         // this prevents. Cloud paths deliberately don't do this.
         history = history.flattenedForStrictChatTemplates
+        // A spawned llama-server has a hard, known context window (the `-c`
+        // it was launched with) and hard-fails a request over it — trim to
+        // actually fit. Ollama truncates internally rather than erroring,
+        // and MLX has no window this app knows, so only llama.cpp trims.
+        if record.backend == .llamaCpp {
+            let window = (record.contextSize ?? .defaultValue).tokens
+            history = history.trimmedToFit(contextTokens: window)
+        }
 
         let ephemeralConfig = CustomProviderConfig(
             brand: ModelCatalog.brand(for: record.requestModelId),
@@ -2303,6 +2867,12 @@ class ChatViewModel {
             format: .openAICompatible,
             modelIDs: [record.requestModelId]
         )
+        // Only sent when the user has switched thinking off for a model
+        // that actually supports the toggle — leaving it unset for every
+        // other model preserves that model's own default reasoning
+        // behavior exactly as before this feature existed.
+        let extraFields: [String: Any]? = (!thinkingEnabled && record.supportsThinkingToggle == true) ? ["think": false] : nil
+
         try await CustomProviderAPIService().streamCompletion(
             config: ephemeralConfig,
             apiKey: "local-no-key",
@@ -2312,17 +2882,24 @@ class ChatViewModel {
             // Local servers (Ollama/llama.cpp) accept the tools parameter
             // for tool-trained models; the service retries without it for
             // models that reject it, so this can't break plain local chat.
-            nativeTools: nativeTools
+            nativeTools: nativeTools,
+            extraFields: extraFields,
+            sampling: ModelParametersStore.shared.effectiveParameters
         )
 
-        loadingStatusText = nil
-        guard let index = messages.firstIndex(where: { $0.id == aiMsgId }) else { return }
-        messages[index].wasColdLoad = !wasAlreadyWarm
-        if !wasAlreadyWarm, record.backend != .ollama {
-            messages[index].coldLoadDurationSeconds = llamaCppMlxLoadDuration
+        generationSession.loadingStatusText = nil
+        withMessages(for: conversationId) { current in
+            guard let index = current.firstIndex(where: { $0.id == aiMsgId }) else { return }
+            current[index].wasColdLoad = !wasAlreadyWarm
+            if !wasAlreadyWarm, record.backend != .ollama {
+                current[index].coldLoadDurationSeconds = llamaCppMlxLoadDuration
+            }
         }
         if record.backend == .ollama, let status = await LocalAIManager.shared.ollamaModelStatus(record.requestModelId) {
-            messages[index].localMemoryBytes = status.sizeVRAMBytes
+            withMessages(for: conversationId) { current in
+                guard let index = current.firstIndex(where: { $0.id == aiMsgId }) else { return }
+                current[index].localMemoryBytes = status.sizeVRAMBytes
+            }
             // The completion above just streamed through the OpenAI-compat
             // endpoint, which silently ignores keep_alive and leaves Ollama
             // at its own hardcoded 5-minute default — this re-asserts the
@@ -2372,8 +2949,13 @@ class ChatViewModel {
     private func streamCompletion(
         apiKey: String,
         aiMessageId: UUID,
+        modelId: String,
+        conversationId: UUID,
         typewriter: TypewriterStreamController,
-        nativeTools: NativeToolConfig? = nil
+        nativeTools: NativeToolConfig? = nil,
+        // nil on the first call → read the user's global parameters; a retry
+        // passes an explicit value (empty) to drop them, see below.
+        samplingOverride: SamplingParameters? = nil
     ) async throws {
         var request = URLRequest(url: AquaAPI.chatCompletionsURL)
         request.httpMethod = "POST"
@@ -2381,14 +2963,18 @@ class ChatViewModel {
         request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        var apiMessages: [[String: Any]] = systemPromptHistory.map(\.openAICompatibleJSON)
-        apiMessages += messages.dropLast().map { historyTurn(for: $0).openAICompatibleJSON }
+        var apiMessages: [[String: Any]] = systemPromptHistory(for: conversationId, modelId: modelId).map(\.openAICompatibleJSON)
+        let priorMessages = withMessages(for: conversationId, { $0 }) ?? []
+        apiMessages += priorMessages.dropLast().map { historyTurn(for: $0, modelId: modelId).openAICompatibleJSON }
+
+        let sampling = samplingOverride ?? ModelParametersStore.shared.effectiveParameters
 
         var body: [String: Any] = [
-            "model": selectedModel,
+            "model": modelId,
             "messages": apiMessages,
             "stream": true,
         ]
+        for (key, value) in sampling.openAIFields() { body[key] = value }
         if let nativeTools {
             body["tools"] = nativeTools.tools
         }
@@ -2403,7 +2989,14 @@ class ChatViewModel {
             // rejects the tools parameter must not break chat — retry
             // once without it; the fenced-markup channel still works.
             if nativeTools != nil, (400...422).contains(httpResponse.statusCode), errorBody.lowercased().contains("tool") {
-                try await streamCompletion(apiKey: apiKey, aiMessageId: aiMessageId, typewriter: typewriter, nativeTools: nil)
+                try await streamCompletion(apiKey: apiKey, aiMessageId: aiMessageId, modelId: modelId, conversationId: conversationId, typewriter: typewriter, nativeTools: nil, samplingOverride: sampling)
+                return
+            }
+            // A model that rejects a sampling parameter (common with
+            // reasoning models refusing `temperature`) shouldn't strand the
+            // user who just moved a slider — retry once without them.
+            if !sampling.isEmpty, (400...422).contains(httpResponse.statusCode), SamplingParameters.looksLikeRejection(errorBody) {
+                try await streamCompletion(apiKey: apiKey, aiMessageId: aiMessageId, modelId: modelId, conversationId: conversationId, typewriter: typewriter, nativeTools: nativeTools, samplingOverride: SamplingParameters())
                 return
             }
             throw APIClientError.httpError(status: httpResponse.statusCode, message: errorBody)
@@ -2448,7 +3041,7 @@ class ChatViewModel {
             if sawAny { return }
         }
 
-        let fallbackText = String(data: collected, encoding: .utf8) ?? "Unexpected response from Aqua API."
+        let fallbackText = String(data: collected, encoding: .utf8) ?? "Unexpected response from Eaon API."
         throw APIClientError.unexpectedResponse(fallbackText)
     }
 
@@ -2502,19 +3095,25 @@ class ChatViewModel {
     /// `refreshWorkspace(streaming: false)` in `sendMessage`'s epilogue.
     private var lastStreamingWorkspaceRefresh = Date.distantPast
 
-    private func setAssistantMessageContent(id: UUID, content: String) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].content = content
+    private func setAssistantMessageContent(id: UUID, content: String, for conversationId: UUID) {
+        withMessages(for: conversationId) { current in
+            guard let index = current.firstIndex(where: { $0.id == id }) else { return }
+            current[index].content = content
+        }
         // Real content arriving means any local-model load is over — clear
         // the loading text right away rather than waiting for the whole
         // response to finish.
-        if !content.isEmpty { loadingStatusText = nil }
+        if !content.isEmpty { session(for: conversationId).loadingStatusText = nil }
         // Live-update the workspace as file blocks stream in, so code types
         // into the panel's editor in real time. Throttled to 10Hz: this
         // callback fires on EVERY typewriter tick (as often as every ~3ms
         // under backlog), and `files(fromMessages:)` re-line-scans every
         // fence-carrying message in the conversation each call — measured
         // as a major share of the full-core burn during agent streaming.
+        // Only the VISIBLE conversation's workspace panel should react —
+        // a background generation's files are re-derived fresh whenever
+        // the user actually switches to that conversation.
+        guard conversationId == currentConversationId else { return }
         if WorkspaceParser.mightContainFiles(content) {
             let now = Date()
             if now.timeIntervalSince(lastStreamingWorkspaceRefresh) >= 0.1 {
@@ -2524,26 +3123,28 @@ class ChatViewModel {
         }
     }
 
-    private func finalizeGeneration(id: UUID) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        let end = Date()
-        messages[index].generationEndTime = end
-        let chars = messages[index].content.count
-        let approxTok = max(1, Int(ceil(Double(chars) / 4.0)))
-        messages[index].generatedTokenCount = approxTok
+    private func finalizeGeneration(id: UUID, modelId: String, for conversationId: UUID) {
+        withMessages(for: conversationId) { current in
+            guard let index = current.firstIndex(where: { $0.id == id }) else { return }
+            let end = Date()
+            current[index].generationEndTime = end
+            let chars = current[index].content.count
+            let approxTok = max(1, Int(ceil(Double(chars) / 4.0)))
+            current[index].generatedTokenCount = approxTok
 
-        // Record speed sample for leaderboard
-        if let start = messages[index].generationStartTime, approxTok > 10 {
-            let latency = end.timeIntervalSince(start)
-            let tps = latency > 0 ? Double(approxTok) / latency : 0
-            let modelId = messages[index].modelId ?? selectedModel
-            if !modelId.isEmpty {
-                StatisticsTracker.shared.recordCompletionSpeed(
-                    modelId: modelId,
-                    tokensPerSecond: tps,
-                    latency: latency,
-                    tokenCount: approxTok
-                )
+            // Record speed sample for leaderboard
+            if let start = current[index].generationStartTime, approxTok > 10 {
+                let latency = end.timeIntervalSince(start)
+                let tps = latency > 0 ? Double(approxTok) / latency : 0
+                let resolvedModelId = current[index].modelId ?? modelId
+                if !resolvedModelId.isEmpty {
+                    StatisticsTracker.shared.recordCompletionSpeed(
+                        modelId: resolvedModelId,
+                        tokensPerSecond: tps,
+                        latency: latency,
+                        tokenCount: approxTok
+                    )
+                }
             }
         }
     }
@@ -2560,20 +3161,35 @@ class ChatViewModel {
         return String(data: collected, encoding: .utf8) ?? "Unknown error"
     }
 
+    /// For immediate feedback on the currently-visible conversation only —
+    /// every call site fires synchronously before any generation (and
+    /// hence any real conversation id) exists yet, e.g. "no model
+    /// selected." Never called from inside the generation pipeline itself
+    /// — see `markError(id:text:for:)` for that.
     private func appendSystemError(_ text: String) {
         messages.append(ChatMessage(content: text, isUser: false, isError: true))
         saveMessages()
     }
 
-    private func markError(id: UUID, text: String) {
-        if let index = messages.firstIndex(where: { $0.id == id }) {
-            messages[index].content = text
-            messages[index].isError = true
-        } else {
-            appendSystemError(text)
+    /// The generation pipeline's own error path — conversation-id-aware,
+    /// so a background generation's failure lands correctly even if the
+    /// user has since switched to a different chat.
+    private func markError(id: UUID, text: String, for conversationId: UUID) {
+        let found = withMessages(for: conversationId) { current -> Bool in
+            guard let index = current.firstIndex(where: { $0.id == id }) else { return false }
+            current[index].content = text
+            current[index].isError = true
+            return true
+        } ?? false
+        if !found {
+            withMessages(for: conversationId) { $0.append(ChatMessage(content: text, isUser: false, isError: true)) }
         }
-        saveMessages()
-        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
+        persistGeneration(for: conversationId)
+        // A background conversation's error shouldn't buzz the trackpad for
+        // something the user isn't even looking at.
+        if conversationId == currentConversationId {
+            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
+        }
     }
 }
 
@@ -2623,7 +3239,7 @@ enum TransientHTTPRetry {
     private static let retryableStatuses: Set<Int> = [502, 503, 504]
 
     /// Backoff before attempt N (1-indexed gap): 400ms, 800ms, 1.6s, 3.2s —
-    /// exponential, capped. Chosen after watching Aqua's gateway alternate
+    /// exponential, capped. Chosen after watching Eaon's gateway alternate
     /// 502 and 200 on the *same* request within a couple of seconds during a
     /// real origin flap: three quick tries (the old ~1.5s total) fell inside
     /// that window and surfaced a hard error the very next retry would have
@@ -2637,7 +3253,7 @@ enum TransientHTTPRetry {
     static func send(_ request: URLRequest, maxAttempts: Int = 5) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
         var attempt = 1
         while true {
-            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            let (bytes, response) = try await AppHTTP.session.bytes(for: request)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
             guard retryableStatuses.contains(http.statusCode), attempt < maxAttempts else {
                 return (bytes, http)
@@ -2654,7 +3270,7 @@ enum TransientHTTPRetry {
     static func sendData(_ request: URLRequest, maxAttempts: Int = 5) async throws -> (Data, HTTPURLResponse) {
         var attempt = 1
         while true {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await AppHTTP.session.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
             guard retryableStatuses.contains(http.statusCode), attempt < maxAttempts else {
                 return (data, http)

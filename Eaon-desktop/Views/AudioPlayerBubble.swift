@@ -77,6 +77,7 @@ struct AudioPlayerBubble: View {
             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(colors.backgroundPrimary)
+                .iconHoverEffect(for: isPlaying ? "pause.fill" : "play.fill")
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(colors.textPrimary))
                 // Optical centering: play's triangle reads left-of-center
@@ -121,6 +122,7 @@ struct AudioPlayerBubble: View {
             Image(systemName: "square.and.arrow.down")
                 .font(.system(size: 13, weight: .regular))
                 .foregroundStyle(colors.textSecondary)
+                .iconHoverEffect(for: "square.and.arrow.down")
         }
         .buttonStyle(PressableButtonStyle())
         .help("Download")

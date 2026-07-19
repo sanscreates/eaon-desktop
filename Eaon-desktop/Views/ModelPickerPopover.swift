@@ -82,6 +82,7 @@ struct ModelPickerMenu: View {
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(colors.textTertiary)
+                    .iconHoverEffect(for: "chevron.up.chevron.down")
             }
             .padding(.leading, viewModel.selectedModel.isEmpty ? 14 : 8)
             .padding(.trailing, 12)
@@ -114,7 +115,11 @@ struct ModelPickerMenu: View {
     }
 }
 
-private struct ModelPickerPopoverContent: View {
+/// Not private — reused as-is by the floating desktop assistant
+/// (`QuickAssistantPanelView`), which wants the exact same search/provider-
+/// grouping/local-model behavior behind its own minimal glass-styled
+/// trigger rather than `ModelPickerMenu`'s full boxed button.
+struct ModelPickerPopoverContent: View {
     @Environment(\.themeColors) private var colors
     @Bindable var viewModel: ChatViewModel
     @Bindable private var modelPrefs = ModelPreferencesStore.shared
@@ -177,7 +182,7 @@ private struct ModelPickerPopoverContent: View {
                 key: .aqua,
                 settingsSelectionId: "aqua",
                 brand: .aqua,
-                title: "Aqua Devs",
+                title: "Eaon",
                 isEnabled: !modelPrefs.isProviderDisabled(.aqua),
                 models: aquaModels.sorted(by: modelNameSort)
             ))
@@ -471,6 +476,7 @@ private struct ProviderGroupHeader: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(colors.textTertiary)
                         .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                        .iconHoverEffect(for: "chevron.right")
 
                     Spacer(minLength: 0)
                 }
@@ -484,6 +490,7 @@ private struct ProviderGroupHeader: View {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(colors.textSecondary)
+                    .iconHoverEffect(for: "gearshape.fill")
                     .frame(width: 22, height: 22)
                     .background(colors.backgroundSubtle)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -561,6 +568,7 @@ private struct MinimalModelRow: View {
                     Image(systemName: isFav ? "star.fill" : "star")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(isFav ? Color.yellow : colors.textTertiary)
+                        .iconHoverEffect(for: "star")
                         .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.plain)

@@ -7,6 +7,12 @@ private let conversationMaxWidth: CGFloat = 768
 struct ChatHomeView: View {
     @Environment(\.themeColors) private var colors
     @Bindable var viewModel: ChatViewModel
+    /// Read here (not just inside `MessageCell`) so a change to font size or
+    /// the colored-user-bubble/accent-color settings actually reaches
+    /// already-rendered rows — see `MessageCell`'s own doc on why an
+    /// `Equatable`-gated view can't discover an external dependency it
+    /// didn't have a chance to re-read.
+    @Bindable private var appearance = AppearanceSettings.shared
     /// Whether the sidebar is currently hidden — with no rail left reserving
     /// space in that corner, the top bar itself has to clear the traffic
     /// lights and offer a way to bring the sidebar back.
@@ -38,6 +44,10 @@ struct ChatHomeView: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
+
+            if mode == .agent, !DesktopControlStore.shared.isEnabled {
+                DeviceControlOptInHint { onOpenProviderSettings("computer") }
+            }
 
             if viewModel.messages.isEmpty {
                 emptyState
@@ -140,10 +150,83 @@ struct ChatHomeView: View {
                 .frame(maxWidth: conversationMaxWidth)
                 .padding(.horizontal, 24)
 
+            if !recentConversations.isEmpty {
+                emptyStateRecents
+                    .frame(maxWidth: conversationMaxWidth)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 22)
+            }
+
             Spacer()
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Empty-state recents
+
+    /// The most recent chats, so a fresh window offers somewhere to go back
+    /// to instead of a blank void — tapping one opens it.
+    private var emptyStateRecents: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("RECENT")
+                .font(AppFont.mono(10, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(colors.textTertiary)
+                .padding(.leading, 4)
+                .padding(.bottom, 2)
+            ForEach(recentConversations) { conversation in
+                Button {
+                    viewModel.selectConversation(conversation.id)
+                } label: {
+                    HStack(spacing: 11) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 12))
+                            .foregroundStyle(colors.textTertiary)
+                            .frame(width: 26, height: 26)
+                            .background(Circle().fill(colors.backgroundChip.opacity(0.6)))
+                        Text(conversation.title)
+                            .font(AppFont.sans(13))
+                            .foregroundStyle(colors.textPrimary.opacity(0.85))
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text(Self.relativeTime(conversation.updatedAt))
+                            .font(AppFont.mono(10.5))
+                            .foregroundStyle(colors.textTertiary)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(colors.textTertiary.opacity(0.7))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(EmptyStateRowButtonStyle())
+                .help("Open this chat")
+            }
+        }
+    }
+
+    /// A short "2h ago" / "3d ago" for a recent chat's last activity —
+    /// concrete without cluttering the row with a full timestamp.
+    private static func relativeTime(_ date: Date) -> String {
+        let seconds = Date().timeIntervalSince(date)
+        if seconds < 60 { return "just now" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
+        if seconds < 86_400 { return "\(Int(seconds / 3600))h ago" }
+        if seconds < 604_800 { return "\(Int(seconds / 86_400))d ago" }
+        let weeks = Int(seconds / 604_800)
+        return weeks < 5 ? "\(weeks)w ago" : "\(Int(seconds / 2_629_800))mo ago"
+    }
+
+    /// The three most recently updated non-empty chats, excluding whatever's
+    /// open now — a quick way back into real work from a fresh window.
+    private var recentConversations: [Conversation] {
+        viewModel.conversations
+            .filter { !$0.messages.isEmpty && $0.id != viewModel.currentConversationId }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(3)
+            .map { $0 }
     }
 
     // MARK: - Conversation
@@ -302,11 +385,15 @@ struct ChatHomeView: View {
         MessageCell(
             message: message,
             isActivelyTyping: viewModel.activeTypingMessageId == message.id,
-            onRegenerate: { viewModel.startSend() },
+            onRegenerate: { viewModel.regenerateLastResponse() },
+            onEditUserMessage: { newText in viewModel.editUserMessageAndResend(id: message.id, newContent: newText) },
             onOpenWorkspaceFile: { viewModel.openWorkspace(selecting: $0) },
+            isBusy: viewModel.isGenerating,
             showHeader: isFirstInAssistantRun(index),
             showFooter: isLastInAssistantRun(index),
-            loadingStatusText: viewModel.activeTypingMessageId == message.id ? viewModel.loadingStatusText : nil
+            loadingStatusText: viewModel.activeTypingMessageId == message.id ? viewModel.loadingStatusText : nil,
+            fontSize: appearance.fontSize.messageFontSize,
+            userBubbleFill: appearance.coloredUserBubble ? appearance.accentColor.opacity(0.15) : colors.userBubble
         )
         // The skip-unchanged-rows gate — see MessageCell's own == doc.
         .equatable()
@@ -396,6 +483,23 @@ private struct BottomAnchorOffsetKey: PreferenceKey {
     }
 }
 
+/// Subtle press/hover feedback for empty-state recent-chat rows —
+/// a light background tint on hover so they read as tappable without shouting.
+private struct EmptyStateRowButtonStyle: ButtonStyle {
+    @Environment(\.themeColors) private var colors
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(isHovered || configuration.isPressed ? colors.backgroundHover : .clear)
+            )
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .onHover { isHovered = $0 }
+    }
+}
+
 /// Floating affordance shown only once the user has scrolled away from a
 /// live-updating bottom — the explicit way back, rather than requiring a
 /// manual drag all the way down.
@@ -470,6 +574,7 @@ struct TopBarIconButton: View {
             HStack(spacing: 6) {
                 Image(systemName: systemName)
                     .font(.system(size: 14, weight: .medium))
+                    .iconHoverEffect(for: systemName)
                 if let label {
                     Text(label).font(AppFont.mono(13, weight: .medium))
                 }
@@ -506,7 +611,22 @@ struct MessageCell: View, Equatable {
     let message: ChatMessage
     var isActivelyTyping: Bool = false
     var onRegenerate: () -> Void = {}
+    var onEditUserMessage: (String) -> Void = { _ in }
     var onOpenWorkspaceFile: ((String) -> Void)? = nil
+    /// Whether the conversation is mid-generation — hides the user-message
+    /// Edit affordance while a reply is streaming (editing then would be a
+    /// no-op the view-model guards against anyway). In `==` so the affordance
+    /// correctly appears/disappears when generation starts or stops; that's
+    /// only two re-evaluations per turn, not the per-tick storm the gate is
+    /// really there to prevent.
+    var isBusy: Bool = false
+
+    /// Inline "edit & resend" state for a user message — kept as local view
+    /// state (not lifted to the view-model) so entering/leaving the editor
+    /// never touches the message model or triggers a persist until Save.
+    @State private var isEditingUserMessage = false
+    @State private var editDraft = ""
+    @State private var isHoveringUserBubble = false
 
     static func == (lhs: MessageCell, rhs: MessageCell) -> Bool {
         lhs.message == rhs.message
@@ -514,6 +634,9 @@ struct MessageCell: View, Equatable {
             && lhs.showHeader == rhs.showHeader
             && lhs.showFooter == rhs.showFooter
             && lhs.loadingStatusText == rhs.loadingStatusText
+            && lhs.fontSize == rhs.fontSize
+            && lhs.userBubbleFill == rhs.userBubbleFill
+            && lhs.isBusy == rhs.isBusy
     }
     /// True only for the first assistant-side message in a run of
     /// consecutive non-user messages (an agent turn) — shows the model
@@ -532,8 +655,17 @@ struct MessageCell: View, Equatable {
     /// this can't be derived locally the way the llama.cpp/MLX case below
     /// can; `ChatViewModel` already did the real pre-flight check.
     var loadingStatusText: String? = nil
-
-    private var fontSize: CGFloat { AppearanceSettings.shared.fontSize.messageFontSize }
+    /// Both of these used to be computed properties reaching straight into
+    /// `AppearanceSettings.shared` — invisible to `==` above, so once a row
+    /// rendered once, `.equatable()` would keep reusing that render forever
+    /// and a later Font Size / colored-bubble / accent-color change in
+    /// Settings would never reach already-on-screen messages (reported live
+    /// as "the font changer doesn't work"). Passed in from `ChatHomeView`
+    /// instead, which itself reads `AppearanceSettings` — a genuine change
+    /// now shows up as a real inequality here, the same way a genuine
+    /// `message` change always did.
+    var fontSize: CGFloat = AppFontSize.medium.messageFontSize
+    var userBubbleFill: Color = .clear
 
     /// Merges the two real local-loading signals into one: `loadingStatusText`
     /// (passed in, Ollama's case) and `LocalAIManager`'s own live spawn
@@ -588,12 +720,6 @@ struct MessageCell: View, Equatable {
         return parts.joined(separator: " · ")
     }
 
-    private var userBubbleFill: Color {
-        AppearanceSettings.shared.coloredUserBubble
-            ? AppearanceSettings.shared.accentColor.opacity(0.15)
-            : colors.userBubble
-    }
-
     var body: some View {
         if message.isToolResult == true {
             ToolResultsCard(content: message.content)
@@ -620,19 +746,93 @@ struct MessageCell: View, Equatable {
                 if !message.attachments.isEmpty {
                     MessageAttachmentsView(attachments: message.attachments)
                 }
-                if !message.content.isEmpty {
-                    Text(message.content)
-                        .font(AppFont.sans(fontSize))
-                        .foregroundStyle(colors.textPrimary)
-                        .multilineTextAlignment(.leading)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(userBubbleFill)
-                        )
+                if isEditingUserMessage {
+                    userMessageEditor
+                } else if !message.content.isEmpty {
+                    userBubble
                 }
+            }
+        }
+    }
+
+    private var userBubble: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Text(message.content)
+                .font(AppFont.sans(fontSize))
+                .foregroundStyle(colors.textPrimary)
+                .multilineTextAlignment(.leading)
+                .textSelection(.enabled)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(userBubbleFill)
+                )
+
+            // Revealed on hover (and hidden while a reply is generating).
+            Button {
+                editDraft = message.content
+                withAnimation(.easeOut(duration: 0.12)) { isEditingUserMessage = true }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "pencil")
+                        .iconHoverEffect(for: "pencil")
+                    Text("Edit")
+                }
+                .font(AppFont.mono(11, weight: .medium))
+                .foregroundStyle(colors.textTertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Edit this message and resend")
+            .opacity(isHoveringUserBubble && !isBusy ? 1 : 0)
+            .allowsHitTesting(isHoveringUserBubble && !isBusy)
+        }
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) { isHoveringUserBubble = hovering }
+        }
+    }
+
+    private var userMessageEditor: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            TextEditor(text: $editDraft)
+                .font(AppFont.sans(fontSize))
+                .foregroundStyle(colors.textPrimary)
+                .scrollContentBackground(.hidden)
+                .frame(minWidth: 300, idealWidth: 440, maxWidth: 520, minHeight: 62, maxHeight: 220)
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(colors.backgroundInput)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(colors.borderMedium, lineWidth: 1)
+                )
+
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) { isEditingUserMessage = false }
+                } label: {
+                    Text("Cancel")
+                        .font(AppFont.mono(12, weight: .medium))
+                        .foregroundStyle(colors.textSecondary)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    let text = editDraft
+                    isEditingUserMessage = false
+                    onEditUserMessage(text)
+                } label: {
+                    Text("Save & Resend")
+                        .font(AppFont.mono(12, weight: .semibold))
+                        .foregroundStyle(AppearanceSettings.shared.onAccentColor)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(AppearanceSettings.shared.accentColor))
+                }
+                .buttonStyle(PressableButtonStyle())
+                .disabled(editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
     }
@@ -652,6 +852,7 @@ struct MessageCell: View, Equatable {
                     modelAttributionHeader
                 }
                 HoverRevealAssistantBody(
+                    messageId: message.id,
                     content: message.content,
                     isActivelyTyping: isActivelyTyping,
                     onRegenerate: onRegenerate,
@@ -845,6 +1046,7 @@ struct ToolResultsCard: View {
 /// doesn't shift the message above/below it.
 private struct HoverRevealAssistantBody: View {
     @Environment(\.themeColors) private var colors
+    let messageId: UUID
     let content: String
     let isActivelyTyping: Bool
     var onRegenerate: () -> Void
@@ -880,7 +1082,7 @@ private struct HoverRevealAssistantBody: View {
                 }
                 // Copy should hand back the real answer, not the model's
                 // internal <think> scratchpad riding along in `content`.
-                MessageActionsRow(content: ReasoningExtractor.extract(from: content).visibleContent, onRegenerate: onRegenerate)
+                MessageActionsRow(messageId: messageId, content: ReasoningExtractor.extract(from: content).visibleContent, onRegenerate: onRegenerate)
                     .opacity(isHovered ? 1 : 0)
                     .animation(.easeOut(duration: 0.12), value: isHovered)
             }
@@ -894,11 +1096,13 @@ private struct HoverRevealAssistantBody: View {
 
 struct MessageActionsRow: View {
     @Environment(\.themeColors) private var colors
+    var messageId: UUID = UUID()
     let content: String
     var onRegenerate: () -> Void = {}
 
     @State private var copied = false
     @State private var reaction: Int = 0 // -1 down, 0 none, 1 up
+    @Bindable private var narrator = SpeechNarrator.shared
 
     var body: some View {
         HStack(spacing: 2) {
@@ -907,6 +1111,12 @@ struct MessageActionsRow: View {
                 NSPasteboard.general.setString(content, forType: .string)
                 copied = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+            }
+            ActionIcon(
+                systemName: narrator.isSpeaking(messageId) ? "stop.fill" : "speaker.wave.2",
+                help: narrator.isSpeaking(messageId) ? "Stop" : "Read aloud"
+            ) {
+                narrator.toggle(id: messageId, text: content)
             }
             ActionIcon(systemName: reaction == 1 ? "hand.thumbsup.fill" : "hand.thumbsup", help: "Good response") {
                 reaction = reaction == 1 ? 0 : 1

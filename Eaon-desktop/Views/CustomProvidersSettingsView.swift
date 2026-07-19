@@ -31,7 +31,7 @@ struct CustomProviderDetailSettingsView: View {
 
     // "White" as an accent reads fine as a fill, but as bare text on this
     // page's own background it can vanish in light mode — fall back to the
-    // normal readable text color for that one option. Mirrors Aqua's page.
+    // normal readable text color for that one option. Mirrors Eaon's page.
     private var confirmationTextColor: Color {
         AppearanceSettings.shared.accentColorId == "white" ? colors.textPrimary : AppearanceSettings.shared.accentColor
     }
@@ -59,7 +59,7 @@ struct CustomProviderDetailSettingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(colors.backgroundPrimary)
         .onAppear {
-            // Mirrors Aqua's page: prefill the real stored key (SecureField
+            // Mirrors Eaon's page: prefill the real stored key (SecureField
             // never displays it as plaintext) so Save is a harmless resave
             // when nothing changed, rather than "blank means keep current."
             apiKeyInput = store.apiKey(for: config.id) ?? ""
@@ -138,6 +138,7 @@ struct CustomProviderDetailSettingsView: View {
                     Image(systemName: "pencil")
                         .font(.system(size: 8, weight: .bold))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "pencil")
                 }
                 .frame(width: 16, height: 16)
                 .overlay(Circle().stroke(colors.borderSubtle, lineWidth: 1))
@@ -187,10 +188,10 @@ struct CustomProviderDetailSettingsView: View {
                     set: { _ in chatViewModel.toggleProvider(.custom(config.id)) }
                 ))
                 .toggleStyle(.switch)
-                .tint(AppearanceSettings.shared.accentColor)
+                .tint(AppearanceSettings.toggleTint)
                 .help(modelPrefs.isProviderDisabled(.custom(config.id))
                       ? "Turn \(config.displayName) back on"
-                      : "Turn \(config.displayName) off — this connection only, doesn't affect Aqua or your other providers")
+                      : "Turn \(config.displayName) off — this connection only, doesn't affect Eaon or your other providers")
             }
             .padding(16)
         }
@@ -256,6 +257,7 @@ struct CustomProviderDetailSettingsView: View {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(colors.textSecondary)
+                            .iconHoverEffect(for: "arrow.clockwise")
                             .frame(width: 28, height: 28)
                             .background(colors.backgroundInput)
                             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -333,6 +335,7 @@ struct CustomProviderDetailSettingsView: View {
                     Image(systemName: modelPrefs.isFavorite(modelId) ? "star.fill" : "star")
                         .font(.system(size: 13))
                         .foregroundColor(modelPrefs.isFavorite(modelId) ? .yellow : colors.textSecondary)
+                        .iconHoverEffect(for: "star")
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
@@ -345,6 +348,7 @@ struct CustomProviderDetailSettingsView: View {
                     Image(systemName: "square.and.pencil")
                         .font(.system(size: 13))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "square.and.pencil")
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
@@ -356,6 +360,7 @@ struct CustomProviderDetailSettingsView: View {
                     Image(systemName: "trash")
                         .font(.system(size: 13))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "trash")
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
@@ -470,7 +475,7 @@ struct CustomProviderEditorSheet: View {
     /// an existing one, where it wouldn't make sense) — Aqua isn't one of
     /// `sortedBrands` here (it's the app's own backend, not a BYOK
     /// connection), so this is its only way back for someone who opened
-    /// this generic sheet but actually wanted Aqua's free hosted models.
+    /// this generic sheet but actually wanted Eaon's free hosted models.
     var onWantsAqua: (() -> Void)?
 
     @State private var brand: ProviderBrand
@@ -592,7 +597,7 @@ struct CustomProviderEditorSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let onWantsAqua {
                     Button(action: onWantsAqua) {
-                        Text("Looking for Aqua's free hosted models instead?")
+                        Text("Looking for Eaon's free hosted models instead?")
                             .font(AppFont.mono(11, weight: .medium))
                             .foregroundColor(colors.link)
                     }
@@ -672,6 +677,7 @@ struct CustomProviderEditorSheet: View {
                             } else {
                                 Image(systemName: "arrow.clockwise")
                                     .font(.system(size: 10, weight: .semibold))
+                                    .iconHoverEffect(for: "arrow.clockwise")
                             }
                             Text("Fetch")
                                 .font(AppFont.mono(11, weight: .medium))
@@ -795,6 +801,7 @@ struct CustomProviderEditorSheet: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .rotationEffect(.degrees(showAdvanced ? 90 : 0))
+                        .iconHoverEffect(for: "chevron.right")
                     Text("Advanced settings")
                         .font(AppFont.mono(12, weight: .medium))
                 }
@@ -911,6 +918,7 @@ private struct BrandPickerDropdown: View {
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(colors.textTertiary)
+                    .iconHoverEffect(for: "chevron.up.chevron.down")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)

@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// Settings → Computer Control. Off by default — the master switch for
-/// letting the model organize files, run commands, and open/close/drive
-/// apps and websites on this Mac. The page's job is disclosure: say plainly
-/// what it can do and what keeps it safe, so turning it on is an informed
-/// choice, not a mystery toggle.
+/// Settings → Device Control (formerly its own "Eaon Claw" mode with a
+/// dedicated enable gate — folded into Agent mode now, see `EaonMode`). Off
+/// by default — the master switch for letting Agent, in addition to coding,
+/// organize files, run commands, and open/close/drive apps and websites on
+/// this Mac. The page's job is disclosure: say plainly what it can do and
+/// what keeps it safe, so turning it on is an informed choice, not a
+/// mystery toggle.
 struct ComputerControlSettingsView: View {
     @Environment(\.themeColors) private var colors
     @Bindable private var store = DesktopControlStore.shared
@@ -12,7 +14,7 @@ struct ComputerControlSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Text("Computer Control")
+                Text("Device Control")
                     .font(AppFont.mono(20, weight: .bold))
                     .foregroundColor(colors.textPrimary)
                 BetaBadge()
@@ -21,7 +23,7 @@ struct ComputerControlSettingsView: View {
             .padding(.top, 28)
             .padding(.bottom, 8)
 
-            Text("Let Eaon act on this Mac when you ask — organize files, run commands, and open, close, and navigate apps and websites. Off by default; nothing runs until you turn it on here.")
+            Text("Let Agent act on this Mac when you ask — organize files, run commands, and open, close, and navigate apps and websites, on top of its usual coding tools. Off by default; nothing runs until you turn it on here.")
                 .font(AppFont.sans(12))
                 .foregroundColor(colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -60,7 +62,7 @@ struct ComputerControlSettingsView: View {
                 Toggle("", isOn: $store.isEnabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .tint(AppearanceSettings.shared.accentColor)
+                    .tint(AppearanceSettings.toggleTint)
             }
             .padding(16)
         }

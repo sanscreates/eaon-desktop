@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Settings → Image Providers — bring-your-own cloud image API keys and
 /// local Stable Diffusion servers (Automatic1111 / DrawThings / ComfyUI in
-/// compatible mode). Aqua's own hosted image models need nothing here —
+/// compatible mode). Eaon's own hosted image models need nothing here —
 /// they use the same Aqua key chat already does, and show up in the model
 /// picker automatically.
 struct ImageProvidersSettingsView: View {
@@ -21,7 +21,7 @@ struct ImageProvidersSettingsView: View {
                 .padding(.top, 28)
                 .padding(.bottom, 8)
 
-            Text("Aqua's own hosted image models (nanobanana, GPT Image, Ideogram, and others) already work with no setup — they show up in the model picker's Image Generation section automatically. Add a connection here only for your own cloud image API key, or a Stable Diffusion server already running on this Mac.")
+            Text("Eaon's own hosted image models (nanobanana, GPT Image, Ideogram, and others) already work with no setup — they show up in the model picker's Image Generation section automatically. Add a connection here only for your own cloud image API key, or a Stable Diffusion server already running on this Mac.")
                 .font(AppFont.sans(12))
                 .foregroundColor(colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -73,6 +73,7 @@ struct ImageProvidersSettingsView: View {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 16))
                     .foregroundColor(AppearanceSettings.shared.accentColor)
+                    .iconHoverEffect(for: "plus.circle.fill")
                 Text("Add an image connection")
                     .font(AppFont.mono(13, weight: .medium))
                     .foregroundColor(colors.textPrimary)
@@ -114,6 +115,7 @@ struct ImageProvidersSettingsView: View {
                     Image(systemName: "pencil")
                         .font(.system(size: 12))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "pencil")
                         .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)
@@ -125,6 +127,7 @@ struct ImageProvidersSettingsView: View {
                     Image(systemName: "trash")
                         .font(.system(size: 12))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "trash")
                         .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)

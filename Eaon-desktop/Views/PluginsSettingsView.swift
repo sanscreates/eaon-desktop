@@ -77,6 +77,7 @@ struct PluginsSettingsView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "plus")
+                            .iconHoverEffect(for: "plus")
                         Text("Add")
                     }
                     .font(AppFont.mono(12, weight: .medium))
@@ -291,6 +292,7 @@ private struct PluginRow: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(colors.textTertiary)
                     .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                    .iconHoverEffect(for: "chevron.down")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
@@ -403,6 +405,7 @@ private struct PluginRow: View {
                         HStack(spacing: 5) {
                             Text("Create a \(server.displayName) app")
                             Image(systemName: "arrow.up.right")
+                                .iconHoverEffect(for: "arrow.up.right")
                         }
                         .font(AppFont.mono(12, weight: .medium))
                         .foregroundColor(colors.link)
@@ -489,6 +492,7 @@ private struct PluginRow: View {
                             HStack(spacing: 5) {
                                 Text("Create a token")
                                 Image(systemName: "arrow.up.right")
+                                .iconHoverEffect(for: "arrow.up.right")
                             }
                             .font(AppFont.mono(12, weight: .medium))
                             .foregroundColor(colors.link)

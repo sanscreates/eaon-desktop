@@ -289,6 +289,7 @@ private struct PaletteRow: View {
                 Image(systemName: icon)
                     .font(.system(size: 15))
                     .foregroundStyle(colors.textSecondary)
+                    .iconHoverEffect(for: icon)
                     .frame(width: 22)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)

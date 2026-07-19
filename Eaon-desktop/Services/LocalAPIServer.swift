@@ -69,7 +69,7 @@ private enum LocalAPIRouting {
 
         var errorDescription: String? {
             switch self {
-            case .noAquaKey: return "No Aqua API key is saved in Eaon — add one in Settings → Aqua API."
+            case .noAquaKey: return "No Eaon API key is saved in Eaon — add one in Settings → Eaon API."
             case .noCustomProviderKey(let name): return "No API key saved for \(name) — add one in Settings → Custom Providers."
             }
         }
@@ -242,6 +242,26 @@ final class LocalAPIServer {
         let path = request.path.components(separatedBy: "?").first ?? request.path
         logRequest("\(request.method) \(path)")
 
+        // --- Anti-DNS-rebinding: the listener binds loopback only, but a
+        // malicious web page can still reach 127.0.0.1 from the user's
+        // browser and — via DNS rebinding — satisfy the Same-Origin Policy
+        // to READ the response, draining the API keys this server can
+        // proxy. Two checks kill that whole class of attack:
+        //   1. Host must be loopback. A rebinding attack arrives with the
+        //      attacker's own hostname in Host (e.g. evil.com), not
+        //      127.0.0.1/localhost — reject anything else.
+        //   2. Reject any browser Origin. Real CLIs/scripts (curl, python,
+        //      node) never send an Origin header; only browsers do, so a
+        //      cross-site fetch is refused outright regardless of CORS.
+        guard hostIsLoopback(request.headers["host"]) else {
+            writeErrorResponse(connection, status: "403 Forbidden", message: "Invalid Host header — this server only accepts loopback requests.")
+            return
+        }
+        if let origin = request.headers["origin"], !origin.isEmpty, !originIsLoopback(origin) {
+            writeErrorResponse(connection, status: "403 Forbidden", message: "Cross-origin requests are not allowed. Call this server from a script or CLI, not a web page.")
+            return
+        }
+
         if request.method == "OPTIONS" {
             writeEmptyResponse(connection, status: "204 No Content")
             return
@@ -249,7 +269,8 @@ final class LocalAPIServer {
 
         if LocalAPIServerStore.shared.requireAPIKey {
             let expected = "Bearer \(LocalAPIServerStore.shared.apiKey)"
-            guard request.headers["authorization"] == expected else {
+            let provided = request.headers["authorization"] ?? ""
+            guard Self.constantTimeEquals(provided, expected) else {
                 writeErrorResponse(connection, status: "401 Unauthorized", message: "Missing or incorrect Authorization header.")
                 return
             }
@@ -436,8 +457,43 @@ final class LocalAPIServer {
 
     // MARK: - Raw HTTP writing
 
+    /// Deliberately NO `Access-Control-Allow-Origin`. This server is for
+    /// scripts and CLIs, never web pages — omitting the header means a
+    /// browser's Same-Origin Policy blocks any cross-site page from reading
+    /// a response, a second layer under the explicit Origin rejection in
+    /// `route`. (`X-Content-Type-Options` blocks MIME sniffing.)
     private func corsHeaders() -> String {
-        "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
+    }
+
+    /// Only loopback hostnames are allowed — the anti-rebinding gate. Accepts
+    /// a missing Host (HTTP/1.0 / raw socket tools) since those aren't
+    /// browsers; rejects any real non-loopback hostname.
+    private func hostIsLoopback(_ host: String?) -> Bool {
+        guard let host, !host.isEmpty else { return true }
+        let name = host.components(separatedBy: ":").first?.lowercased() ?? host.lowercased()
+        return name == "127.0.0.1" || name == "localhost" || name == "::1" || name == "[::1]"
+    }
+
+    /// A loopback Origin (e.g. another local tool that happens to send one)
+    /// is fine; any real web origin is not.
+    private func originIsLoopback(_ origin: String) -> Bool {
+        guard let url = URL(string: origin), let host = url.host?.lowercased() else { return false }
+        return host == "127.0.0.1" || host == "localhost" || host == "::1"
+    }
+
+    /// Length-independent, byte-for-byte compare so the auth check can't be
+    /// narrowed by a timing side channel — belt-and-suspenders on a loopback
+    /// server, but this is the security pass.
+    private static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+        let x = Array(a.utf8), y = Array(b.utf8)
+        var diff = x.count ^ y.count
+        for i in 0..<Swift.max(x.count, y.count) {
+            let xi = i < x.count ? x[i] : 0
+            let yi = i < y.count ? y[i] : 0
+            diff |= Int(xi ^ yi)
+        }
+        return diff == 0
     }
 
     private func writeJSONResponse(_ connection: NWConnection, status: String, json: [String: Any]) {

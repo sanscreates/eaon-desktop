@@ -85,6 +85,7 @@ struct ModelListCard: View {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(colors.textSecondary)
+                            .iconHoverEffect(for: "arrow.clockwise")
                             .frame(width: 28, height: 28)
                             .background(colors.backgroundInput)
                             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -105,6 +106,7 @@ struct ModelListCard: View {
                         Image(systemName: "plus")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(colors.textSecondary)
+                            .iconHoverEffect(for: "plus")
                             .frame(width: 28, height: 28)
                             .background(colors.backgroundInput)
                             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -180,6 +182,7 @@ struct ModelListCard: View {
                     Image(systemName: modelPrefs.isFavorite(model.id) ? "star.fill" : "star")
                         .font(.system(size: 13))
                         .foregroundColor(modelPrefs.isFavorite(model.id) ? .yellow : colors.textSecondary)
+                        .iconHoverEffect(for: "star")
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
@@ -192,6 +195,7 @@ struct ModelListCard: View {
                     Image(systemName: "square.and.pencil")
                         .font(.system(size: 13))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "square.and.pencil")
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
@@ -203,6 +207,7 @@ struct ModelListCard: View {
                     Image(systemName: "trash")
                         .font(.system(size: 13))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "trash")
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)

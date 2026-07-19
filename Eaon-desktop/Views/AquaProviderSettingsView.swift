@@ -30,7 +30,7 @@ struct AquaProviderSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Aqua API")
+            Text("Eaon API")
                 .font(AppFont.mono(20, weight: .bold))
                 .foregroundColor(colors.textPrimary)
                 .padding(.horizontal, 32)
@@ -95,7 +95,7 @@ struct AquaProviderSettingsView: View {
                 AquaMark(size: 36)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Aqua API")
+                    Text("Eaon API")
                         .font(AppFont.mono(14, weight: .semibold))
                         .foregroundColor(colors.textPrimary)
                     Text(AquaAPI.baseURL.absoluteString)
@@ -110,8 +110,8 @@ struct AquaProviderSettingsView: View {
                     set: { _ in chatViewModel.toggleProvider(.aqua) }
                 ))
                 .toggleStyle(.switch)
-                .tint(AppearanceSettings.shared.accentColor)
-                .help(modelPrefs.isProviderDisabled(.aqua) ? "Turn Aqua back on" : "Turn Aqua off — every model it serves stops working")
+                .tint(AppearanceSettings.toggleTint)
+                .help(modelPrefs.isProviderDisabled(.aqua) ? "Turn Eaon back on" : "Turn Eaon off — every model it serves stops working")
             }
             .padding(16)
         }
@@ -130,7 +130,7 @@ struct AquaProviderSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 10) {
-                    SecureField("Paste your Aqua API key", text: $apiKeyInput)
+                    SecureField("Paste your Eaon API key", text: $apiKeyInput)
                         .textFieldStyle(.plain)
                         .font(AppFont.mono(13))
                         .padding(.horizontal, 12)
@@ -178,6 +178,7 @@ struct AquaProviderSettingsView: View {
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(colors.textSecondary)
+                                .iconHoverEffect(for: "arrow.clockwise")
                                 .frame(width: 28, height: 28)
                                 .background(colors.backgroundInput)
                                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -197,6 +198,7 @@ struct AquaProviderSettingsView: View {
                                 Image(systemName: "plus")
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundColor(colors.textSecondary)
+                                    .iconHoverEffect(for: "plus")
                                     .frame(width: 28, height: 28)
                                     .background(colors.backgroundInput)
                                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -289,6 +291,7 @@ struct AquaProviderSettingsView: View {
                     Image(systemName: modelPrefs.isFavorite(model.id) ? "star.fill" : "star")
                         .font(.system(size: 13))
                         .foregroundColor(modelPrefs.isFavorite(model.id) ? .yellow : colors.textSecondary)
+                        .iconHoverEffect(for: "star")
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
@@ -302,6 +305,7 @@ struct AquaProviderSettingsView: View {
                     Image(systemName: "square.and.pencil")
                         .font(.system(size: 13))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "square.and.pencil")
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
@@ -313,6 +317,7 @@ struct AquaProviderSettingsView: View {
                     Image(systemName: "trash")
                         .font(.system(size: 13))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "trash")
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)

@@ -49,10 +49,21 @@ struct ModelLibraryView: View {
     /// search bar that isn't part of the curated list.
     @State private var customPullSize: Int64?
     @State private var isCheckingCustomPullSize = false
-    /// Which HF repo's quantization picker is currently open, and its
-    /// lazily-fetched options (fetched once per repo, cached here).
-    @State private var quantPickerRepo: String?
+    /// Which HF repo cards have their variant (quantization) list expanded
+    /// inline, and the lazily-fetched options per repo (fetched once, cached
+    /// here). "Show variants" reveals every real quantization the repo
+    /// publishes, each with its own size, fit check, and download.
+    @State private var expandedHFRepos: Set<String> = []
     @State private var ggufOptions: [String: [LocalAIManager.GGUFFile]] = [:]
+    /// The auto-picked default quant label per repo (e.g. "Q4_K_M"),
+    /// captured during size prefetch so the collapsed card's one-click
+    /// download button can name exactly which file it'll fetch.
+    @State private var hfDefaultQuant: [String: String] = [:]
+    /// A quant picker row (or the plain one-click download button) tapped
+    /// while its own real fit estimate is `.tooBig` — held here so an alert
+    /// can confirm before actually starting the download, rather than
+    /// downloading tens of gigabytes on the first tap with no warning.
+    @State private var pendingTooBigDownload: (repo: String, file: LocalAIManager.GGUFFile?)?
     /// Real params/quantization/family for curated + custom-pull Ollama
     /// entries, keyed by model name — fetched lazily from Ollama's public
     /// registry (see `LocalAIManager.fetchOllamaRegistrySpecs`) rather than
@@ -185,6 +196,7 @@ struct ModelLibraryView: View {
                 HStack(spacing: 5) {
                     Image(systemName: "terminal")
                         .font(.system(size: 11))
+                        .iconHoverEffect(for: "terminal")
                     Text("Install Local Runners")
                         .font(AppFont.mono(11, weight: .medium))
                 }
@@ -302,24 +314,31 @@ struct ModelLibraryView: View {
     /// point at.
     private func prefetchHFSizes(for results: [LocalAIManager.HFSearchResult]) async {
         hfSizes.removeAll()
+        hfDefaultQuant.removeAll()
+        expandedHFRepos.removeAll()
         hfSizesFetching = Set(results.map(\.id))
         let format = hfFormat
-        await withTaskGroup(of: (String, Int64?).self) { group in
+        await withTaskGroup(of: (id: String, size: Int64?, quant: String?).self) { group in
             for result in results {
                 group.addTask {
                     switch format {
                     case .gguf:
+                        // Resolve the same auto-picked file `startHFDownload`
+                        // would fetch, and derive its quant label so the
+                        // collapsed card can name it ("Download · Q4_K_M").
                         let file = try? await manager.resolveGGUFFile(repo: result.id)
-                        return (result.id, file?.size)
+                        let quant = file.map { LocalAIManager.GGUFFile(path: $0.path, size: $0.size).quantLabel }
+                        return (result.id, file?.size, (quant?.isEmpty == false) ? quant : nil)
                     case .mlx:
                         let size = try? await manager.resolveMLXRepoSize(repo: result.id)
-                        return (result.id, size)
+                        return (result.id, size, nil)
                     }
                 }
             }
-            for await (id, size) in group {
+            for await (id, size, quant) in group {
                 guard !Task.isCancelled else { return }
                 if let size, size > 0 { hfSizes[id] = size }
+                if let quant { hfDefaultQuant[id] = quant }
                 hfSizesFetching.remove(id)
             }
         }
@@ -329,30 +348,62 @@ struct ModelLibraryView: View {
     /// cached (or already in flight) yet — called when "Popular" first
     /// appears and whenever another category is expanded, so specs load
     /// progressively instead of all 124 models' worth up front.
+    ///
+    /// Fetches concurrently via a task group and merges the results into
+    /// `ollamaSpecs` in ONE state write, not one per model — the previous
+    /// version fired an independent `Task` per name, each mutating
+    /// `ollamaSpecs`/`ollamaSpecsFetching` the instant its own request
+    /// landed. With 14 models in "Popular" alone, that's 14 separate
+    /// SwiftUI re-renders of the whole card (each re-running
+    /// `groupedCuratedModels`'s grouping pass) firing in a ragged burst as
+    /// responses trickle in — this was the actual, measurable "the page
+    /// lags when I open it" cause, not the network calls themselves.
+    /// Mirrors `prefetchHFSizes`'s already-correct batching pattern below.
     private func prefetchOllamaSpecs(for names: [String]) {
-        for name in names {
-            guard ollamaSpecs[name] == nil, !ollamaSpecsFetching.contains(name) else { continue }
-            ollamaSpecsFetching.insert(name)
-            Task {
-                let specs = await manager.fetchOllamaRegistrySpecs(name: name)
-                ollamaSpecsFetching.remove(name)
-                if let specs { ollamaSpecs[name] = specs }
+        let pending = names.filter { ollamaSpecs[$0] == nil && !ollamaSpecsFetching.contains($0) }
+        guard !pending.isEmpty else { return }
+        ollamaSpecsFetching.formUnion(pending)
+        Task {
+            let fetched = await withTaskGroup(of: (String, LocalAIManager.OllamaModelSpecs?).self) { group in
+                for name in pending {
+                    group.addTask { (name, await manager.fetchOllamaRegistrySpecs(name: name)) }
+                }
+                var results: [String: LocalAIManager.OllamaModelSpecs] = [:]
+                for await (name, specs) in group {
+                    if let specs { results[name] = specs }
+                }
+                return results
             }
+            ollamaSpecsFetching.subtract(pending)
+            ollamaSpecs.merge(fetched) { _, new in new }
         }
     }
 
-    /// "3.2B · Q4_K_M · llama" — only the parts that are actually known are
-    /// joined, and nil comes back rather than an empty string when nothing
-    /// is known yet, so callers can cleanly skip rendering the line at all.
-    private static func specsLine(paramSize: String?, quantization: String?, family: String?, contextLength: Int? = nil) -> String? {
+    /// Real facts (params, quant, family, context) as individual chips
+    /// instead of one dot-joined "3.2B · Q4_K_M · llama" line — a terminal-
+    /// readout look (small monospace tags) reads as more information-dense
+    /// and technical than a single gray caption, and each fact stays
+    /// independently scannable instead of running together. Only the parts
+    /// that are actually known are returned — an empty array when nothing
+    /// is known yet, so callers can cleanly skip rendering anything.
+    private static func specChips(paramSize: String?, quantization: String?, family: String?, contextLength: Int? = nil) -> [String] {
         var parts: [String] = []
         if let paramSize { parts.append(paramSize) }
         if let quantization { parts.append(quantization) }
         if let family { parts.append(family) }
         if let contextLength, contextLength > 0 {
-            parts.append(contextLength >= 1000 ? "\(contextLength / 1000)K context" : "\(contextLength) context")
+            parts.append(contextLength >= 1000 ? "\(contextLength / 1000)K ctx" : "\(contextLength) ctx")
         }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        return parts
+    }
+
+    /// A compact byte count in the same style as the rest of the page's
+    /// GB readouts — used for the aggregate "Σ size" stat on category
+    /// headers, a small but genuinely nerdy touch (real total, not a
+    /// vibes estimate).
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let gb = Double(bytes) / 1_000_000_000
+        return gb >= 100 ? String(format: "%.0f GB", gb) : String(format: "%.1f GB", gb)
     }
 
     // MARK: Ollama library
@@ -425,11 +476,18 @@ struct ModelLibraryView: View {
                     Text("\(models.count)")
                         .font(AppFont.mono(11))
                         .foregroundColor(colors.textTertiary)
+                    // A real computed total, not a vibe — how much disk
+                    // this whole category would cost if you downloaded
+                    // every model in it.
+                    Text("Σ \(Self.formatBytes(models.reduce(0) { $0 + $1.sizeBytes }))")
+                        .font(AppFont.mono(10.5))
+                        .foregroundColor(colors.textTertiary)
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(colors.textTertiary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .iconHoverEffect(for: "chevron.right")
                 }
                 .contentShape(Rectangle())
             }
@@ -438,7 +496,7 @@ struct ModelLibraryView: View {
 
             if isExpanded {
                 SettingsCard {
-                    VStack(spacing: 0) {
+                    LazyVStack(spacing: 0) {
                         ForEach(Array(models.enumerated()), id: \.element.id) { index, model in
                             if index > 0 { Divider().padding(.leading, 16) }
                             curatedRow(model)
@@ -471,12 +529,8 @@ struct ModelLibraryView: View {
                                 .foregroundColor(colors.textTertiary)
                                 .lineLimit(1)
                         }
-                        if pullStatusText(for: name) == nil,
-                           let specs = ollamaSpecs[name],
-                           let line = Self.specsLine(paramSize: specs.paramSize, quantization: specs.quantization, family: specs.family) {
-                            Text(line)
-                                .font(AppFont.mono(10.5))
-                                .foregroundColor(colors.textTertiary)
+                        if pullStatusText(for: name) == nil, let specs = ollamaSpecs[name] {
+                            SpecChipRow(chips: Self.specChips(paramSize: specs.paramSize, quantization: specs.quantization, family: specs.family))
                         }
                     }
                     .contentShape(Rectangle())
@@ -540,12 +594,8 @@ struct ModelLibraryView: View {
                             .foregroundColor(colors.textSecondary)
                             .lineLimit(1)
                     }
-                    if pullStatusText(for: model.name) == nil,
-                       let specs = ollamaSpecs[model.name],
-                       let line = Self.specsLine(paramSize: specs.paramSize, quantization: specs.quantization, family: specs.family) {
-                        Text(line)
-                            .font(AppFont.mono(10.5))
-                            .foregroundColor(colors.textTertiary)
+                    if pullStatusText(for: model.name) == nil, let specs = ollamaSpecs[model.name] {
+                        SpecChipRow(chips: Self.specChips(paramSize: specs.paramSize, quantization: specs.quantization, family: specs.family))
                     }
                 }
                 .contentShape(Rectangle())
@@ -568,6 +618,7 @@ struct ModelLibraryView: View {
                     Image(systemName: "slider.horizontal.3")
                         .font(.system(size: 11))
                         .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "slider.horizontal.3")
                         .frame(width: 26, height: 26)
                         .background(Circle().stroke(colors.borderMedium, lineWidth: 1))
                 }
@@ -632,17 +683,16 @@ struct ModelLibraryView: View {
                         .font(AppFont.mono(13, weight: .semibold))
                         .foregroundColor(colors.textPrimary)
 
-                    SettingsCard {
-                        VStack(spacing: 0) {
-                            ForEach(Array(hfResults.enumerated()), id: \.element.id) { index, result in
-                                if index > 0 { Divider().padding(.leading, 16) }
-                                hfRow(result)
-                            }
+                    // One card per model (like the reference), not a single
+                    // divided list — each card can expand its own variants.
+                    LazyVStack(spacing: 12) {
+                        ForEach(hfResults) { result in
+                            hfModelCard(result)
                         }
                     }
 
                     Text(hfFormat == .gguf
-                         ? "Hugging Face hosts hundreds of thousands of models — search above for anything specific. The best single-file (GGUF) version is picked automatically for each one."
+                         ? "Hugging Face hosts hundreds of thousands of models — search above for anything specific. Each card downloads the best single-file (GGUF) version by default; open “Show variants” to pick a specific quantization."
                          : "Hugging Face hosts hundreds of thousands of models — search above for anything specific. MLX is Apple's own framework and often runs faster than GGUF here; models download automatically the first time you chat with them.")
                         .font(AppFont.sans(11))
                         .foregroundColor(colors.textTertiary)
@@ -675,183 +725,324 @@ struct ModelLibraryView: View {
         .background(Capsule().fill(colors.backgroundChip))
     }
 
-    private func hfRow(_ result: LocalAIManager.HFSearchResult) -> some View {
-        let download = manager.hfDownloads[result.id]
-        return HStack(spacing: 12) {
-            ModelOriginBadge(brand: LocalAIManager.guessBrand(forName: result.id))
-            Button {
-                openHuggingFacePage(for: result.id)
-            } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(result.id)
-                        .font(AppFont.mono(12.5, weight: .semibold))
+    /// One Hugging Face model, as a card: name + size/fit + default-download
+    /// at the top, an author/stats line beneath, and (GGUF only) a
+    /// "Show variants" toggle that expands the full quantization list inline.
+    private func hfModelCard(_ result: LocalAIManager.HFSearchResult) -> some View {
+        let repo = result.id
+        let parts = repo.split(separator: "/", maxSplits: 1).map(String.init)
+        let author = parts.count > 1 ? parts[0] : nil
+        let name = parts.count > 1 ? parts[1] : repo
+        let isExpanded = expandedHFRepos.contains(repo)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            // Header: name (left) · size + fit + action (right).
+            HStack(alignment: .top, spacing: 12) {
+                Button { openHuggingFacePage(for: repo) } label: {
+                    Text(name)
+                        .font(AppFont.mono(15, weight: .semibold))
                         .foregroundColor(colors.textPrimary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("See \(repo)'s model card on huggingface.co")
 
-                    if let download {
+                Spacer(minLength: 12)
+
+                VStack(alignment: .trailing, spacing: 8) {
+                    if manager.downloadedModelId(forRepo: repo) == nil, manager.hfDownloads[repo] == nil {
                         HStack(spacing: 8) {
-                            if let fraction = download.fraction, !download.finished, !download.failed {
-                                ProgressView(value: fraction)
-                                    .controlSize(.small)
-                                    .frame(width: 120)
+                            if let size = hfSizes[repo] {
+                                Text(String(format: "%.1f GB", Double(size) / 1_000_000_000))
+                                    .font(AppFont.mono(12, weight: .medium))
+                                    .foregroundColor(colors.textSecondary)
+                                ModelFitBadge(estimate: ModelFitEstimator.assess(downloadSizeBytes: size, backend: hfFormat.backend))
+                            } else if hfSizesFetching.contains(repo) {
+                                ModelFitLoadingBadge()
                             }
-                            Text(download.status)
-                                .font(AppFont.mono(11))
-                                .foregroundColor(download.failed ? colors.destructive : colors.textSecondary)
-                                .lineLimit(1)
                         }
-                    } else {
-                        // Size leads the line once it's known — "will this
-                        // fit on my disk / in my memory" is the first
-                        // question a real download decision asks, ahead of
-                        // popularity. (For GGUF it's the auto-picked file's
-                        // size; the quant picker shows each variant's own.)
-                        Text(
-                            (hfSizes[result.id].map { String(format: "%.1f GB · ", Double($0) / 1_000_000_000) } ?? "")
-                            + "\(Self.formatCount(result.downloads)) downloads · \(Self.formatCount(result.likes)) likes"
-                        )
-                        .font(AppFont.mono(11))
-                        .foregroundColor(colors.textTertiary)
                     }
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("See \(result.id)'s model card on huggingface.co")
-
-            Spacer(minLength: 12)
-
-            if download == nil, manager.downloadedModelId(forRepo: result.id) == nil {
-                if let size = hfSizes[result.id] {
-                    ModelFitBadge(estimate: ModelFitEstimator.assess(downloadSizeBytes: size, backend: hfFormat.backend))
-                } else if hfSizesFetching.contains(result.id) {
-                    ModelFitLoadingBadge()
+                    hfPrimaryAction(repo: repo, name: name)
                 }
             }
 
-            if let downloadedId = manager.downloadedModelId(forRepo: result.id) {
-                chatButton(modelId: downloadedId)
-            } else if let download, !download.failed {
-                Button {
-                    manager.cancelHFDownload(repo: result.id)
-                } label: {
+            // Author + real stats (downloads / likes) on the left; the
+            // variants toggle on the right (GGUF only — MLX quants are
+            // separate repos, so there's nothing to expand).
+            HStack(spacing: 14) {
+                if let author {
+                    Text("By \(author)")
+                        .font(AppFont.mono(11))
+                        .foregroundColor(colors.textSecondary)
+                }
+                statChip(icon: "arrow.down.circle", text: Self.formatCount(result.downloads))
+                statChip(icon: "heart", text: Self.formatCount(result.likes))
+
+                Spacer(minLength: 8)
+
+                if hfFormat == .gguf {
+                    Button {
+                        toggleHFVariants(repo)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text("Show variants")
+                                .font(AppFont.mono(11, weight: .medium))
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                                .iconHoverEffect(for: "chevron.down")
+                        }
+                        .foregroundColor(colors.textSecondary)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("List every quantization this model publishes")
+                }
+            }
+
+            if isExpanded {
+                Divider().overlay(colors.borderSubtle)
+                hfVariantsList(repo: repo)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(colors.backgroundElevated)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(colors.borderSubtle, lineWidth: 1)
+        )
+        .alert(
+            "This probably won't run comfortably",
+            isPresented: Binding(
+                get: { pendingTooBigDownload?.repo == repo },
+                set: { if !$0 { pendingTooBigDownload = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { pendingTooBigDownload = nil }
+            Button("Download anyway", role: .destructive) {
+                guard let pending = pendingTooBigDownload else { return }
+                pendingTooBigDownload = nil
+                if pending.file == nil, manager.hfDownloads[pending.repo]?.failed == true {
+                    manager.clearHFDownloadState(repo: pending.repo)
+                }
+                manager.startHFDownload(repo: pending.repo, file: pending.file) { modelId in
+                    if let modelId { onStartChat(modelId) }
+                }
+            }
+        } message: {
+            if let size = pendingTooBigDownload?.file?.size ?? hfSizes[repo] {
+                Text(ModelFitEstimator.assess(downloadSizeBytes: size, backend: hfFormat.backend).detail)
+            }
+        }
+    }
+
+    /// The card's top-right action — reflects real state: chat when it's
+    /// already downloaded, progress + cancel mid-download, retry after a
+    /// failure, else a one-click "Download · <quant>" for the auto-picked
+    /// default file.
+    @ViewBuilder
+    private func hfPrimaryAction(repo: String, name: String) -> some View {
+        let download = manager.hfDownloads[repo]
+        if let downloadedId = manager.downloadedModelId(forRepo: repo) {
+            chatButton(modelId: downloadedId)
+        } else if let download, !download.failed {
+            HStack(spacing: 8) {
+                if let fraction = download.fraction, !download.finished {
+                    ProgressView(value: fraction).controlSize(.small).frame(width: 90)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Button { manager.cancelHFDownload(repo: repo) } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 14))
                         .foregroundStyle(colors.textTertiary)
+                        .iconHoverEffect(for: "xmark.circle.fill")
                 }
                 .buttonStyle(.plain)
                 .help("Cancel download")
-            } else if hfFormat == .mlx {
-                // No quant picker here — MLX quantizations are separate
-                // repos already (e.g. the "-4bit"/"-8bit" suffix), unlike
-                // GGUF's one-repo-many-files shape, so there's nothing to
-                // pick after you've already picked the search result. And
-                // there's no in-app download to track: `addUserModel`
-                // registers it, then the same one-click "land in chat"
-                // behavior GGUF gets kicks off the real (lazy,
-                // mlx_lm.server-driven) download.
-                downloadButton(disabled: false) {
-                    manager.addUserModel(backend: .mlx, source: result.id, isFile: false)
-                    if let modelId = manager.downloadedModelId(forRepo: result.id) {
-                        onStartChat(modelId)
-                    }
+            }
+        } else if hfFormat == .mlx {
+            // MLX has no in-app download to track — `addUserModel` registers
+            // it, then the same one-click "land in chat" hand-off kicks off
+            // the real (lazy, mlx_lm.server-driven) download.
+            hfDownloadPill(label: "Download") {
+                manager.addUserModel(backend: .mlx, source: repo, isFile: false)
+                if let modelId = manager.downloadedModelId(forRepo: repo) { onStartChat(modelId) }
+            }
+        } else {
+            let quantSuffix = hfDefaultQuant[repo].map { " · \($0)" } ?? ""
+            hfDownloadPill(label: "Download\(quantSuffix)", failed: download?.failed == true) {
+                if let size = hfSizes[repo], ModelFitEstimator.assess(downloadSizeBytes: size, backend: hfFormat.backend).verdict == .tooBig {
+                    pendingTooBigDownload = (repo, nil)
+                    return
                 }
-            } else {
-                HStack(spacing: 6) {
-                    Button {
-                        quantPickerRepo = result.id
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 11))
-                            .foregroundColor(colors.textSecondary)
-                            .frame(width: 26, height: 26)
-                            .background(Circle().stroke(colors.borderMedium, lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Choose a quantization")
-                    .popover(isPresented: Binding(
-                        get: { quantPickerRepo == result.id },
-                        set: { if !$0 { quantPickerRepo = nil } }
-                    )) {
-                        quantPickerContent(repo: result.id)
-                    }
-
-                    downloadButton(disabled: false) {
-                        if download?.failed == true { manager.clearHFDownloadState(repo: result.id) }
-                        manager.startHFDownload(repo: result.id) { modelId in
-                            // One click really means one click: land the
-                            // user in a chat with it the moment it's ready,
-                            // instead of leaving a second "Chat" button for
-                            // them to notice and click themselves.
-                            if let modelId { onStartChat(modelId) }
-                        }
-                    }
+                if download?.failed == true { manager.clearHFDownloadState(repo: repo) }
+                manager.startHFDownload(repo: repo) { modelId in
+                    if let modelId { onStartChat(modelId) }
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 11)
     }
 
-    /// Lists every real quantization Hugging Face actually has for this
-    /// repo (smallest first) — fetched once per repo and cached, so
-    /// reopening the picker doesn't re-hit the API. Picking one downloads
-    /// that exact file instead of the auto-picked Q4_K_M default.
-    @ViewBuilder
-    private func quantPickerContent(repo: String) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Choose a quantization")
-                .font(AppFont.mono(12, weight: .semibold))
-                .foregroundColor(colors.textPrimary)
-                .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
+    private func hfDownloadPill(label: String, failed: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: failed ? "arrow.clockwise" : "arrow.down.circle")
+                    .font(.system(size: 11))
+                    .iconHoverEffect(for: failed ? "arrow.clockwise" : "arrow.down.circle")
+                Text(failed ? "Retry" : label)
+                    .font(AppFont.mono(12, weight: .medium))
+            }
+            .foregroundStyle(colors.textPrimary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Capsule().stroke(colors.borderMedium, lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(PressableButtonStyle())
+    }
 
-            if let options = ggufOptions[repo] {
-                if options.isEmpty {
-                    Text("No GGUF files found.")
-                        .font(AppFont.mono(12))
-                        .foregroundColor(colors.textTertiary)
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 12)
-                } else {
-                    ForEach(options) { file in
-                        Button {
-                            quantPickerRepo = nil
-                            manager.startHFDownload(repo: repo, file: file) { modelId in
-                                if let modelId { onStartChat(modelId) }
-                            }
-                        } label: {
-                            HStack {
-                                Text(file.quantLabel.isEmpty ? "Default" : file.quantLabel)
-                                    .font(AppFont.mono(12, weight: .medium))
-                                    .foregroundColor(colors.textPrimary)
-                                Spacer(minLength: 12)
-                                Text(String(format: "%.1f GB", Double(file.size) / 1_000_000_000))
-                                    .font(AppFont.mono(11))
-                                    .foregroundColor(colors.textTertiary)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(PressableButtonStyle())
-                    }
-                    .padding(.bottom, 6)
-                }
+    private func statChip(icon: String, text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 10))
+            Text(text)
+                .font(AppFont.mono(11))
+        }
+        .foregroundColor(colors.textTertiary)
+    }
+
+    private func toggleHFVariants(_ repo: String) {
+        withAnimation(.easeOut(duration: 0.15)) {
+            if expandedHFRepos.contains(repo) {
+                expandedHFRepos.remove(repo)
             } else {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 20)
+                expandedHFRepos.insert(repo)
             }
         }
-        .frame(width: 230)
-        .task(id: repo) {
-            guard ggufOptions[repo] == nil else { return }
-            let files = (try? await manager.listGGUFFiles(repo: repo)) ?? []
-            ggufOptions[repo] = files
+    }
+
+    /// The inline variant list revealed by "Show variants" — every real
+    /// quantization the repo publishes (smallest first), each with its own
+    /// size class, fit check, size, and a one-click download. Fetched once
+    /// per repo and cached in `ggufOptions`.
+    ///
+    /// Each row runs its OWN `ModelFitEstimator.assess` against that file's
+    /// real size, and a `.tooBig` pick confirms via the card's alert instead
+    /// of downloading tens of GB on the first tap — the exact gap a user hit
+    /// downloading deepseek-v4-flash's largest quant with zero warning.
+    @ViewBuilder
+    private func hfVariantsList(repo: String) -> some View {
+        if let options = ggufOptions[repo] {
+            if options.isEmpty {
+                Text("No downloadable GGUF files found in this repo.")
+                    .font(AppFont.mono(11))
+                    .foregroundColor(colors.textTertiary)
+                    .padding(.vertical, 6)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(options.enumerated()), id: \.element.id) { index, file in
+                        if index > 0 { Divider().overlay(colors.borderSubtle.opacity(0.6)) }
+                        hfVariantRow(repo: repo, file: file)
+                    }
+                }
+            }
+        } else {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Loading variants…")
+                    .font(AppFont.mono(11))
+                    .foregroundColor(colors.textTertiary)
+            }
+            .padding(.vertical, 8)
+            .task(id: repo) {
+                guard ggufOptions[repo] == nil else { return }
+                let files = (try? await manager.listGGUFFiles(repo: repo)) ?? []
+                ggufOptions[repo] = files
+            }
         }
+    }
+
+    private func hfVariantRow(repo: String, file: LocalAIManager.GGUFFile) -> some View {
+        let estimate = ModelFitEstimator.assess(downloadSizeBytes: file.size, backend: hfFormat.backend)
+        let isDefault = hfDefaultQuant[repo] == file.quantLabel && !file.quantLabel.isEmpty
+        let sizeClass = Self.quantSizeClass(file.quantLabel)
+        let fits = estimate.verdict != .tooBig
+
+        return HStack(spacing: 8) {
+            Text(Self.variantDisplayName(file))
+                .font(AppFont.mono(11.5, weight: .medium))
+                .foregroundColor(colors.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if let sizeClass {
+                TagChip(text: sizeClass.text, color: sizeClass.color)
+            }
+            if isDefault {
+                TagChip(text: "Recommended", color: Color(hex: "#F59E0B"))
+            }
+
+            Spacer(minLength: 8)
+
+            Text(String(format: "%.1f GB", Double(file.size) / 1_000_000_000))
+                .font(AppFont.mono(11))
+                .foregroundColor(colors.textTertiary)
+
+            Image(systemName: fits ? "checkmark" : "exclamationmark.triangle.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(fits ? Color(hex: "#34C759") : colors.destructive)
+                .frame(width: 16)
+                .help(estimate.detail)
+
+            Button {
+                if estimate.verdict == .tooBig {
+                    pendingTooBigDownload = (repo, file)
+                } else {
+                    manager.startHFDownload(repo: repo, file: file) { modelId in
+                        if let modelId { onStartChat(modelId) }
+                    }
+                }
+            } label: {
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(colors.textSecondary)
+                    .iconHoverEffect(for: "arrow.down.circle")
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableButtonStyle())
+            .help("Download this quantization")
+        }
+        .padding(.vertical, 8)
+    }
+
+    /// The filename stem shown for a variant — "…-Q4_K_M.gguf" → the bare
+    /// name, matching how the reference lists each quantization.
+    private static func variantDisplayName(_ file: LocalAIManager.GGUFFile) -> String {
+        let base = (file.path as NSString).lastPathComponent
+        if let range = base.range(of: ".gguf", options: [.caseInsensitive, .backwards]) {
+            return String(base[..<range.lowerBound])
+        }
+        return base
+    }
+
+    /// A rough quality/size class from the quant label — the same
+    /// small/balanced/large grouping the reference shows, derived from the
+    /// quantization level (Q2/Q3 trade quality for size, Q4/Q5 are the
+    /// balanced sweet spot, Q6/Q8/F16 keep the most quality at the most
+    /// disk). nil when the label doesn't name a recognized quant.
+    private static func quantSizeClass(_ label: String) -> (text: String, color: Color)? {
+        let l = label.lowercased()
+        if l.contains("q2") || l.contains("q3") { return ("Small", Color(hex: "#5B9BFF")) }
+        if l.contains("q4") || l.contains("q5") { return ("Balanced", Color(hex: "#34C759")) }
+        if l.contains("q6") || l.contains("q8") || l.contains("f16") || l.contains("f32") { return ("Large", Color(hex: "#F59E0B")) }
+        return nil
     }
 
     private static func formatCount(_ count: Int) -> String {
@@ -871,6 +1062,11 @@ struct ModelLibraryView: View {
             Text("On this Mac")
                 .font(AppFont.mono(14, weight: .semibold))
                 .foregroundStyle(colors.textPrimary)
+            if !manager.allLocalModels.isEmpty {
+                Text("\(manager.allLocalModels.count)")
+                    .font(AppFont.mono(11))
+                    .foregroundColor(colors.textTertiary)
+            }
         }
         .padding(.top, 10)
 
@@ -880,7 +1076,7 @@ struct ModelLibraryView: View {
                 .foregroundColor(colors.textSecondary)
         } else {
             SettingsCard {
-                VStack(spacing: 0) {
+                LazyVStack(spacing: 0) {
                     ForEach(Array(manager.allLocalModels.enumerated()), id: \.element.id) { index, record in
                         if index > 0 { Divider().padding(.leading, 16) }
                         localRow(record)
@@ -914,19 +1110,14 @@ struct ModelLibraryView: View {
                 .lineLimit(1)
             // Real specs straight from Ollama's own `/api/tags` for a model
             // already on this Mac — no fetch needed, no guessing. llama.cpp
-            // MLX records have none of these fields, so the line just
+            // MLX records have none of these fields, so the row just
             // doesn't render for them.
-            if let line = Self.specsLine(
+            SpecChipRow(chips: Self.specChips(
                 paramSize: record.paramSize,
                 quantization: record.quantization,
                 family: record.family,
                 contextLength: record.contextLength
-            ) {
-                Text(line)
-                    .font(AppFont.mono(10.5))
-                    .foregroundColor(colors.textTertiary)
-                    .lineLimit(1)
-            }
+            ))
         }
         .contentShape(Rectangle())
 
@@ -964,7 +1155,7 @@ struct ModelLibraryView: View {
             chatButton(modelId: record.id)
 
             if record.backend == .llamaCpp {
-                GPUModeMenu(manager: manager, record: record)
+                LlamaRunSettingsMenu(manager: manager, record: record)
             }
 
             Button {
@@ -973,6 +1164,7 @@ struct ModelLibraryView: View {
                 Image(systemName: "trash")
                     .font(.system(size: 12))
                     .foregroundColor(colors.textSecondary)
+                    .iconHoverEffect(for: "trash")
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
@@ -1002,6 +1194,7 @@ struct ModelLibraryView: View {
             HStack(spacing: 4) {
                 Image(systemName: "bubble.left.fill")
                     .font(.system(size: 9))
+                    .iconHoverEffect(for: "bubble.left.fill")
                 Text("Chat")
                     .font(AppFont.mono(11, weight: .semibold))
             }
@@ -1020,6 +1213,7 @@ struct ModelLibraryView: View {
             HStack(spacing: 4) {
                 Image(systemName: "arrow.down.circle")
                     .font(.system(size: 11))
+                    .iconHoverEffect(for: "arrow.down.circle")
                 Text("Download")
                     .font(AppFont.mono(11, weight: .medium))
             }
@@ -1119,6 +1313,50 @@ struct ModelLibraryView: View {
             .padding(.vertical, 3)
             .background(Capsule().fill(tint.opacity(0.14)))
             .help(estimate.detail)
+        }
+    }
+
+    /// A small tinted label chip — the "Small"/"Balanced"/"Large" size
+    /// class and the "Recommended" flag on each quantization variant.
+    private struct TagChip: View {
+        let text: String
+        let color: Color
+
+        var body: some View {
+            Text(text)
+                .font(AppFont.mono(9.5, weight: .semibold))
+                .foregroundStyle(color)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(color.opacity(0.15)))
+        }
+    }
+
+    /// One real fact (params, quant, family, context) as a small monospace
+    /// tag — the terminal-readout building block `specChips` feeds into.
+    private struct SpecChip: View {
+        @Environment(\.themeColors) private var colors
+        let text: String
+
+        var body: some View {
+            Text(text)
+                .font(AppFont.mono(10, weight: .medium))
+                .foregroundStyle(colors.textSecondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(colors.backgroundChipSecondary))
+        }
+    }
+
+    private struct SpecChipRow: View {
+        let chips: [String]
+
+        var body: some View {
+            if !chips.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(chips, id: \.self) { SpecChip(text: $0) }
+                }
+            }
         }
     }
 

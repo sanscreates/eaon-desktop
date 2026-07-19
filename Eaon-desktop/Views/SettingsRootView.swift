@@ -10,48 +10,93 @@ private struct SettingsCategory: Identifiable, Hashable {
     var isBeta: Bool = false
 }
 
-/// Presented as a centered floating card over a dimmed backdrop — matching
-/// the target, where Settings is a modal window rather than a navigation
-/// destination that replaces the whole chat view.
+/// One labeled group in the settings sidebar — a small caps header (nil for
+/// the leading group, which needs none) over its categories.
+private struct SettingsSectionGroup {
+    let title: String?
+    let categories: [SettingsCategory]
+}
+
+/// The small caps header above a settings sidebar group — same visual
+/// language as the "MODEL PROVIDERS" / "LOCAL" headers below it.
+private struct SettingsSidebarSectionHeader: View {
+    @Environment(\.themeColors) private var colors
+    let title: String
+
+    var body: some View {
+        Text(title.uppercased())
+            .font(AppFont.mono(10, weight: .semibold))
+            .tracking(0.8)
+            .foregroundColor(colors.textTertiary)
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            .padding(.bottom, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A full-page settings destination — its own two-column layout (category
+/// sub-sidebar + content pane) that fills the detail area next to the app's
+/// main sidebar, exactly like the Models page. Not a modal: opening Settings
+/// navigates here (`SidebarDestination.settings`) rather than dimming the
+/// window behind a floating card, so the app's sidebar stays put and you
+/// leave by clicking any other sidebar item (or pressing Esc).
 struct SettingsRootView: View {
     @Environment(\.themeColors) private var colors
     @Bindable var chatViewModel: ChatViewModel
     @Bindable private var modelPrefs = ModelPreferencesStore.shared
     @Bindable private var customStore = CustomProviderStore.shared
     @Bindable private var localManager = LocalAIManager.shared
-    @Binding var isPresented: Bool
     @State private var selectedId: String
-    @State private var appeared = false
     @State private var isAddingProvider = false
+    /// Called when the user presses Esc — lets the host (RootView) navigate
+    /// back to the conversation surface, since a page has no "close" of its
+    /// own the way the old modal did.
+    var onExit: () -> Void = {}
 
     /// `initialSelectionId` lets a caller outside this view's own sidebar —
     /// e.g. the gear icon on a provider's group in the model picker — open
     /// Settings landed directly on that provider's page, instead of always
     /// starting on General.
-    init(chatViewModel: ChatViewModel, isPresented: Binding<Bool>, initialSelectionId: String? = nil) {
+    init(chatViewModel: ChatViewModel, initialSelectionId: String? = nil, onExit: @escaping () -> Void = {}) {
         self.chatViewModel = chatViewModel
-        self._isPresented = isPresented
         self._selectedId = State(initialValue: initialSelectionId ?? "general")
+        self.onExit = onExit
     }
 
-    private let mainCategories: [SettingsCategory] = [
-        .init(id: "general",      title: "General",              icon: "gearshape"),
-        .init(id: "instructions", title: "Custom Instructions",  icon: "text.quote"),
-        .init(id: "memory",       title: "Memory",                icon: "brain"),
-        .init(id: "plugins",      title: "Plugins",                icon: "puzzlepiece.extension"),
-        .init(id: "skills",       title: "Skills",                 icon: "bolt.fill", isBeta: true),
-        .init(id: "imageProviders", title: "Image Providers",     icon: "photo"),
-        .init(id: "computer",     title: "Computer Control",       icon: "desktopcomputer", isBeta: true),
-        .init(id: "localServer",  title: "Local API Server",      icon: "server.rack", isBeta: true),
-        .init(id: "appearance",   title: "Appearance",           icon: "paintpalette"),
-        .init(id: "shortcuts",    title: "Shortcuts",             icon: "keyboard"),
-        .init(id: "privacy",      title: "Privacy",               icon: "lock.fill"),
-        .init(id: "statistics",   title: "Statistics",            icon: "chart.bar"),
-        .init(id: "hardware",     title: "Hardware",              icon: "cpu"),
+    /// The settings categories, grouped into labeled sections so the
+    /// sidebar reads as a few short lists instead of one long crowded one.
+    /// The first group is unlabeled (it leads the list, so a header there
+    /// would just be redundant), the rest carry a small caps header in the
+    /// same style as "MODEL PROVIDERS" / "LOCAL" further down.
+    private let mainSections: [SettingsSectionGroup] = [
+        .init(title: nil, categories: [
+            .init(id: "general",    title: "General",     icon: "gearshape"),
+            .init(id: "appearance", title: "Appearance",  icon: "paintpalette"),
+            .init(id: "shortcuts",  title: "Shortcuts",   icon: "keyboard"),
+        ]),
+        .init(title: "Assistant", categories: [
+            .init(id: "instructions",    title: "Custom Instructions", icon: "text.quote"),
+            .init(id: "modelParameters", title: "Model Parameters",    icon: "slider.horizontal.3"),
+            .init(id: "memory",          title: "Memory",              icon: "brain"),
+            .init(id: "skills",          title: "Skills",              icon: "bolt.fill", isBeta: true),
+        ]),
+        .init(title: "Tools", categories: [
+            .init(id: "plugins",        title: "Plugins",         icon: "puzzlepiece.extension"),
+            .init(id: "imageProviders", title: "Image Providers", icon: "photo"),
+            .init(id: "computer",       title: "Device Control",  icon: "desktopcomputer", isBeta: true),
+            .init(id: "localServer",    title: "Local API Server", icon: "server.rack", isBeta: true),
+            .init(id: "network",        title: "Network",         icon: "network"),
+        ]),
+        .init(title: "System", categories: [
+            .init(id: "privacy",    title: "Privacy",    icon: "lock.fill"),
+            .init(id: "statistics", title: "Statistics", icon: "chart.bar"),
+            .init(id: "hardware",   title: "Hardware",   icon: "cpu"),
+        ]),
     ]
 
     private let providerCategories: [SettingsCategory] = [
-        .init(id: "aqua", title: "Aqua API", icon: "drop.fill"),
+        .init(id: "aqua", title: "Eaon API", icon: "drop.fill"),
     ]
 
     private func customProviderSelectionId(_ config: CustomProviderConfig) -> String {
@@ -78,133 +123,13 @@ struct SettingsRootView: View {
     }
 
     var body: some View {
-        ZStack {
-            colors.backgroundOverlay
-                .ignoresSafeArea()
-                .onTapGesture { isPresented = false }
-
-            card
-                .scaleEffect(appeared ? 1 : 0.96)
-                .opacity(appeared ? 1 : 0)
-        }
-        .onAppear {
-            withAnimation(.easeOut(duration: 0.16)) { appeared = true }
-        }
-        .onExitCommand { isPresented = false }
-    }
-
-    private var card: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Settings")
-                    .font(AppFont.mono(20, weight: .bold))
-                    .foregroundColor(colors.textPrimary)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 20)
-                    .padding(.bottom, 12)
-
-                // The provider brand list can run well past the card's fixed
-                // height (every Aqua-served + BYOK brand gets its own row),
-                // so the nav itself has to scroll — only the title above
-                // stays put.
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(mainCategories) { cat in
-                            SettingsSidebarRow(category: cat, isSelected: selectedId == cat.id)
-                                .onTapGesture { selectedId = cat.id }
-                        }
-                    }
-                    .padding(.horizontal, 8)
-
-                    modelProvidersSection
-                }
-            }
-            .frame(width: 230)
-            .background(colors.backgroundSidebar)
-            .overlay(alignment: .trailing) {
-                Rectangle()
-                    .fill(colors.borderSubtle)
-                    .frame(width: 1)
-            }
-
-            ZStack(alignment: .topTrailing) {
-                Group {
-                    switch selectedId {
-                    case "aqua":
-                        AquaProviderSettingsView(chatViewModel: chatViewModel)
-                    case "statistics":
-                        StatisticsView(chatViewModel: chatViewModel)
-                    case "instructions":
-                        CustomInstructionsSettingsView(chatViewModel: chatViewModel)
-                    case "memory":
-                        MemorySettingsView(chatViewModel: chatViewModel)
-                    case "plugins":
-                        PluginsSettingsView()
-                    case "skills":
-                        SkillsSettingsView()
-                    case "imageProviders":
-                        ImageProvidersSettingsView()
-                    case "computer":
-                        ComputerControlSettingsView()
-                    case "localServer":
-                        LocalAPIServerSettingsView()
-                    case "appearance":
-                        AppearanceSettingsView()
-                    case "shortcuts":
-                        ShortcutsSettingsView()
-                    case "privacy":
-                        PrivacySettingsView(chatViewModel: chatViewModel)
-                    case "hardware":
-                        HardwareSettingsView()
-                    default:
-                        if let config = config(for: selectedId) {
-                            // `.id` forces SwiftUI to tear down and rebuild
-                            // this view (including its @State) when the
-                            // selected provider changes — without it, every
-                            // custom provider hits this same `default` case
-                            // at the same tree position, so SwiftUI reuses
-                            // the previous provider's view instance and its
-                            // stale `apiKeyInput`, leaking one provider's
-                            // key into the next one's Save.
-                            CustomProviderDetailSettingsView(chatViewModel: chatViewModel, config: config)
-                                .id(config.id)
-                        } else if selectedId.hasPrefix("local:"),
-                           let backend = LocalBackend(rawValue: String(selectedId.dropFirst("local:".count))) {
-                            LocalProviderSettingsView(chatViewModel: chatViewModel, backend: backend)
-                        } else {
-                            // Also the fallback for a deleted connection —
-                            // e.g. removing this exact connection from its
-                            // own detail page above leaves `selectedId`
-                            // pointing at an id that no longer resolves.
-                            GeneralSettingsView()
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(colors.backgroundPrimary)
-
-                Button {
-                    isPresented = false
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(colors.textSecondary)
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(colors.backgroundSubtle))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(PressableButtonStyle())
-                .padding(14)
-            }
+            settingsSidebar
+            settingsContent
         }
-        .frame(width: 980, height: 700)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(colors.backgroundPrimary)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(colors.borderSubtle, lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.3), radius: 40, y: 16)
+        .onExitCommand { onExit() }
         .sheet(isPresented: $isAddingProvider) {
             CustomProviderEditorSheet(
                 chatViewModel: chatViewModel,
@@ -213,6 +138,111 @@ struct SettingsRootView: View {
                 onWantsAqua: switchToAquaFromAddProvider
             )
         }
+    }
+
+    private var settingsSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Settings")
+                .font(AppFont.mono(20, weight: .bold))
+                .foregroundColor(colors.textPrimary)
+                .padding(.horizontal, 16)
+                // Clears the window's title-bar band (this page renders under
+                // it, same as the Models page) so the heading isn't tucked
+                // up against the very top edge.
+                .padding(.top, 50)
+                .padding(.bottom, 12)
+
+            // The provider brand list can run well past the window height
+            // (every Aqua-served + BYOK brand gets its own row), so the nav
+            // itself scrolls — only the title above stays put.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(mainSections.enumerated()), id: \.offset) { index, section in
+                        if let title = section.title {
+                            SettingsSidebarSectionHeader(title: title)
+                                // A little more air above a labeled group,
+                                // less above the very first (unlabeled) one.
+                                .padding(.top, index == 0 ? 0 : 14)
+                        }
+                        ForEach(section.categories) { cat in
+                            SettingsSidebarRow(category: cat, isSelected: selectedId == cat.id)
+                                .onTapGesture { selectedId = cat.id }
+                        }
+                    }
+                }
+                .padding(.horizontal, 8)
+
+                modelProvidersSection
+            }
+        }
+        .frame(width: 240)
+        .background(colors.backgroundSidebar)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(colors.borderSubtle)
+                .frame(width: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var settingsContent: some View {
+        Group {
+            switch selectedId {
+            case "aqua":
+                AquaProviderSettingsView(chatViewModel: chatViewModel)
+            case "statistics":
+                StatisticsView(chatViewModel: chatViewModel)
+            case "instructions":
+                CustomInstructionsSettingsView(chatViewModel: chatViewModel)
+            case "modelParameters":
+                ModelParametersSettingsView()
+            case "memory":
+                MemorySettingsView(chatViewModel: chatViewModel)
+            case "plugins":
+                PluginsSettingsView()
+            case "skills":
+                SkillsSettingsView()
+            case "imageProviders":
+                ImageProvidersSettingsView()
+            case "computer":
+                ComputerControlSettingsView()
+            case "localServer":
+                LocalAPIServerSettingsView()
+            case "network":
+                NetworkSettingsView()
+            case "appearance":
+                AppearanceSettingsView()
+            case "shortcuts":
+                ShortcutsSettingsView()
+            case "privacy":
+                PrivacySettingsView(chatViewModel: chatViewModel)
+            case "hardware":
+                HardwareSettingsView()
+            default:
+                if let config = config(for: selectedId) {
+                    // `.id` forces SwiftUI to tear down and rebuild this
+                    // view (including its @State) when the selected provider
+                    // changes — without it, every custom provider hits this
+                    // same `default` case at the same tree position, so
+                    // SwiftUI reuses the previous provider's view instance
+                    // and its stale `apiKeyInput`, leaking one provider's
+                    // key into the next one's Save.
+                    CustomProviderDetailSettingsView(chatViewModel: chatViewModel, config: config)
+                        .id(config.id)
+                } else if selectedId.hasPrefix("local:"),
+                   let backend = LocalBackend(rawValue: String(selectedId.dropFirst("local:".count))) {
+                    LocalProviderSettingsView(chatViewModel: chatViewModel, backend: backend)
+                } else {
+                    // Also the fallback for a deleted connection — e.g.
+                    // removing this exact connection from its own detail
+                    // page above leaves `selectedId` pointing at an id that
+                    // no longer resolves.
+                    GeneralSettingsView()
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(colors.backgroundPrimary)
     }
 
     /// Pulled out of `card` as its own expression — inlined, this section
@@ -235,6 +265,7 @@ struct SettingsRootView: View {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(colors.textTertiary)
+                        .iconHoverEffect(for: "plus")
                 }
                 .buttonStyle(.plain)
                 .help("Add a custom provider")
@@ -298,19 +329,23 @@ private struct SettingsSidebarRow: View {
     let isSelected: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isSelected ? colors.backgroundSelected : colors.backgroundSubtle)
-                    .frame(width: 26, height: 26)
-                Image(systemName: category.icon)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(isSelected ? colors.textPrimary : colors.textSecondary)
-            }
+        // In multicolor "Default" accent mode, each section's icon gets its
+        // own palette color keyed off its id — a column of distinct colors,
+        // one per section. A solid accent falls through to the plain
+        // monochrome look (nil → the normal text colors below).
+        let sectionColor: Color? = AppearanceSettings.shared.isMulticolorAccent
+            ? AppearanceSettings.shared.accentColor(seedFrom: category.id)
+            : nil
+        return HStack(spacing: 10) {
+            Image(systemName: category.icon)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(sectionColor ?? (isSelected ? colors.textPrimary : colors.textSecondary))
+                .iconHoverEffect(for: category.icon)
+                .frame(width: 20, alignment: .center)
 
             Text(category.title)
                 .font(AppFont.mono(13, weight: isSelected ? .semibold : .regular))
-                .foregroundColor(isSelected ? colors.textPrimary : colors.textPrimary.opacity(0.8))
+                .foregroundColor(colors.textPrimary)
                 .lineLimit(1)
 
             if category.isBeta {
@@ -344,7 +379,7 @@ struct BetaBadge: View {
     }
 }
 
-/// Shown instead of a permanent "Aqua API" row until a key is actually
+/// Shown instead of a permanent "Eaon API" row until a key is actually
 /// saved — Aqua is offered, not pre-added, same as any other provider.
 private struct AddAquaRow: View {
     @Environment(\.themeColors) private var colors
@@ -360,10 +395,11 @@ private struct AddAquaRow: View {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(colors.textTertiary)
+                        .iconHoverEffect(for: "plus")
                 }
                 Text("Add provider")
                     .font(AppFont.mono(13, weight: .regular))
-                    .foregroundColor(colors.textSecondary)
+                    .foregroundColor(colors.textPrimary)
                 Spacer()
             }
             .padding(.horizontal, 10)
@@ -371,7 +407,7 @@ private struct AddAquaRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Aqua's free hosted models — add a key to use it")
+        .help("Eaon's free hosted models — add a key to use it")
     }
 }
 
@@ -391,7 +427,7 @@ private struct CustomProviderSidebarRow: View {
 
             Text(config.displayName)
                 .font(AppFont.mono(13, weight: isSelected ? .semibold : .regular))
-                .foregroundColor(isSelected ? colors.textPrimary : colors.textPrimary.opacity(0.8))
+                .foregroundColor(colors.textPrimary)
 
             Spacer()
 
@@ -438,9 +474,7 @@ private struct LocalBackendSidebarRow: View {
 
             Text(backend.displayName)
                 .font(AppFont.mono(13, weight: isSelected ? .semibold : .regular))
-                .foregroundColor(isInstalled
-                                 ? (isSelected ? colors.textPrimary : colors.textPrimary.opacity(0.8))
-                                 : colors.textTertiary)
+                .foregroundColor(isInstalled ? colors.textPrimary : colors.textTertiary)
 
             Spacer()
 
@@ -467,7 +501,15 @@ struct SettingsCard<Content: View>: View {
 
     var body: some View {
         content
-            .background(colors.backgroundElevated)
+            // Same fill as the page itself, not `backgroundElevated` (a
+            // noticeably lighter grey shared with several non-Settings
+            // surfaces — the composer, onboarding, the model picker — so
+            // darkening it globally would ripple well beyond Settings).
+            // Light mode already does exactly this: its card and page fill
+            // are both pure white, separation coming from the border/shadow
+            // alone — this brings dark mode's cards in line with that same
+            // pattern instead of standing out as a distinct lighter slab.
+            .background(colors.backgroundPrimary)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)

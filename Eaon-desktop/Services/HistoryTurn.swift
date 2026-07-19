@@ -102,4 +102,68 @@ extension Array where Element == HistoryTurn {
         guard !systemContents.isEmpty else { return coalesced }
         return [HistoryTurn(role: "system", content: systemContents.joined(separator: "\n\n"))] + coalesced
     }
+
+    /// Trims history to fit a local server's real context window. Unlike
+    /// cloud providers (100K+ windows, own truncation), a spawned
+    /// llama-server has a hard, small window: a request over it is an HTTP
+    /// 400 `exceed_context_size_error` — verified live — which surfaced to
+    /// the user as a raw error the moment a chat grew past the window
+    /// ("small models crash out on long chats"). Policy: keep the system
+    /// turn (the app's operating instructions) and the newest turns; drop
+    /// whole oldest turns first; if the survivors alone still overflow
+    /// (giant pasted message, or a huge system stack in Agent mode),
+    /// truncate the biggest one's middle. ~4 chars/token, the same estimate
+    /// `ContextWindowEstimator` uses, with real headroom reserved for the
+    /// reply so "fits" means the whole request, not just the prompt.
+    func trimmedToFit(contextTokens: Int, replyHeadroomTokens: Int = 1_024) -> [HistoryTurn] {
+        let budgetTokens = contextTokens - replyHeadroomTokens
+        guard budgetTokens > 0 else { return self }
+        func tokens(_ turn: HistoryTurn) -> Int { turn.content.count / 4 + 8 }
+        guard map(tokens).reduce(0, +) > budgetTokens else { return self }
+
+        let systemTurns = filter { $0.role == "system" }
+        var conversation = filter { $0.role != "system" }
+        var kept: [HistoryTurn] = []
+        var used = systemTurns.map(tokens).reduce(0, +)
+        // Newest first, so the current question always survives ahead of
+        // old context.
+        for turn in conversation.reversed() {
+            let cost = tokens(turn)
+            guard used + cost <= budgetTokens else { break }
+            kept.insert(turn, at: 0)
+            used += cost
+        }
+
+        // Survivors alone still over budget → nothing droppable is left;
+        // cut the single biggest turn's middle instead of failing. The
+        // newest conversation turn is force-kept even here — a request
+        // with no user turn at all is a guaranteed template error.
+        if kept.isEmpty, let newest = conversation.last {
+            kept = [newest]
+        }
+        // Dropping oldest turns can leave an assistant turn first — the
+        // exact strict-template violation `flattenedForStrictChatTemplates`
+        // just fixed. Re-enforce user-first on the survivors.
+        while let first = kept.first, first.role != "user", kept.count > 1 {
+            kept.removeFirst()
+        }
+        conversation = systemTurns + kept
+        let total = conversation.map(tokens).reduce(0, +)
+        if total > budgetTokens,
+           let bigIndex = conversation.indices.max(by: { tokens(conversation[$0]) < tokens(conversation[$1]) }) {
+            let overshootChars = (total - budgetTokens) * 4
+            let content = conversation[bigIndex].content
+            let keepChars = Swift.max(400, content.count - overshootChars - 64)
+            if content.count > keepChars {
+                let head = content.prefix(keepChars / 2)
+                let tail = content.suffix(keepChars / 2)
+                conversation[bigIndex] = HistoryTurn(
+                    role: conversation[bigIndex].role,
+                    content: head + "\n\n[… trimmed to fit this model's context window …]\n\n" + tail,
+                    images: conversation[bigIndex].images
+                )
+            }
+        }
+        return conversation
+    }
 }

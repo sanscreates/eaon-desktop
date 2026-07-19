@@ -1,12 +1,17 @@
 import SwiftUI
 
 enum SidebarDestination: Hashable {
-    /// One of the four top-level modes (Chat / Agent / Eaon Claw / Image
-    /// Studio) — the conversational surface, framed for that mode.
+    /// One of the top-level modes (Chat / Agent) — the conversational
+    /// surface, framed for that mode.
     case mode(EaonMode)
     case compare
     case feature(AppFeature)
     case project(UUID)
+    /// The settings page. The associated value is an optional deep-link
+    /// sub-selection (a provider id, "appearance", etc.) so a caller can
+    /// open Settings landed directly on a specific category instead of
+    /// General — nil just opens it on the default (General).
+    case settings(String?)
 }
 
 enum AppFeature: String, Hashable, CaseIterable {
@@ -37,9 +42,10 @@ struct RootView: View {
     /// Projects or Settings must not yank you back to a mode surface.
     @State private var didInitialModeSync = false
     @State private var sidebarCollapsed = false
+    /// One-shot, first-launch-only — never re-shown automatically and never
+    /// blocks anything; see `OnboardingView`'s own doc.
+    @AppStorage("eaon_has_seen_onboarding") private var hasSeenOnboarding = false
     @State private var showingSearchPalette = false
-    @State private var showingSettings = false
-    @State private var settingsInitialSelectionId: String?
     @State private var conversationPendingDeletion: Conversation?
     @State private var conversationPendingRename: Conversation?
     @State private var showingDeleteAllChats = false
@@ -48,6 +54,12 @@ struct RootView: View {
     @State private var projectPendingDeletion: Project?
     @State private var chatViewModel = ChatViewModel()
     @AppStorage("nerd_hud_enabled") private var nerdHUDEnabled = false
+    /// User-chosen width for the right-side coding workspace panel,
+    /// resizable by dragging its leading edge (see `WorkspaceResizeHandle`)
+    /// and persisted across launches. Clamped at use, not at save, so a
+    /// width chosen on a big display degrades gracefully on a smaller one
+    /// instead of permanently shrinking.
+    @AppStorage("eaon_workspace_panel_width") private var workspacePanelWidth = 440.0
     @Bindable private var appearance = AppearanceSettings.shared
     @Bindable private var updateChecker = UpdateChecker.shared
 
@@ -57,6 +69,15 @@ struct RootView: View {
 
     private var colors: ThemeColors {
         ThemeColors.forScheme(resolvedScheme)
+    }
+
+    /// The Settings page keeps its whole navigation (categories, providers)
+    /// in the sidebar and has no in-page control to bring it back, so the
+    /// sidebar stays pinned open there — collapsing it would strand the user
+    /// with no way to switch category or leave.
+    private var isInSettings: Bool {
+        if case .settings = selection { return true }
+        return false
     }
 
     var body: some View {
@@ -72,7 +93,7 @@ struct RootView: View {
                         viewModel: chatViewModel,
                         selection: $selection,
                         showingSearchPalette: $showingSearchPalette,
-                        showingSettings: $showingSettings,
+                        onOpenSettings: { selection = .settings(nil) },
                         onCollapse: { toggleSidebar() },
                         onNewChat: { newChat() },
                         onDeleteRequest: { conversationPendingDeletion = $0 },
@@ -103,17 +124,9 @@ struct RootView: View {
                         selection = .mode(.chat)
                     },
                     onOpenSettings: { selectionId in
-                        settingsInitialSelectionId = selectionId
-                        showingSettings = true
+                        showingSearchPalette = false
+                        selection = .settings(selectionId)
                     }
-                )
-            }
-
-            if showingSettings {
-                SettingsRootView(
-                    chatViewModel: chatViewModel,
-                    isPresented: $showingSettings,
-                    initialSelectionId: settingsInitialSelectionId
                 )
             }
 
@@ -163,6 +176,14 @@ struct RootView: View {
                 AutoModeConfirmationDialog(
                     onConfirm: { chatViewModel.confirmEnterAutoMode() },
                     onCancel: { chatViewModel.cancelEnterAutoMode() }
+                )
+                .zIndex(20)
+            }
+
+            if let question = chatViewModel.pendingAgentQuestion {
+                AgentQuestionDialog(
+                    question: question,
+                    onAnswer: { chatViewModel.answerAgentQuestion($0) }
                 )
                 .zIndex(20)
             }
@@ -233,6 +254,21 @@ struct RootView: View {
                 hudOverlay
             }
 
+            if !hasSeenOnboarding {
+                OnboardingView(
+                    onOpenModels: {
+                        selection = .feature(.models)
+                        hasSeenOnboarding = true
+                    },
+                    onOpenProviderSettings: {
+                        selection = .settings("aqua")
+                        hasSeenOnboarding = true
+                    },
+                    onFinish: { hasSeenOnboarding = true }
+                )
+                .zIndex(30)
+            }
+
             if let manifest = updateChecker.available {
                 VStack {
                     Spacer()
@@ -256,9 +292,23 @@ struct RootView: View {
         .preferredColorScheme(appearance.colorScheme)
         .tint(appearance.accentColor)
         .onAppear {
+            // Gives the floating desktop assistant the app's one real
+            // ChatViewModel — same live model list/selection, no duplicated
+            // fetch. Set unconditionally (unlike the mode-sync below): safe
+            // to repeat, and must survive if RootView is ever recreated.
+            QuickAssistantViewModel.shared.chatViewModel = chatViewModel
             guard !didInitialModeSync else { return }
             didInitialModeSync = true
             selection = .mode(chatViewModel.currentMode)
+        }
+        // Settings pins the sidebar open (see `isInSettings`). If it's
+        // reached while the sidebar is already collapsed — e.g. from ⌘K or a
+        // provider gear in a collapsed-sidebar chat — bring it back so the
+        // user isn't dropped into Settings with no navigation and no exit.
+        .onChange(of: selection) { _, newValue in
+            if case .settings = newValue, sidebarCollapsed {
+                withAnimation(.linear(duration: 0.2)) { sidebarCollapsed = false }
+            }
         }
     }
 
@@ -271,36 +321,55 @@ struct RootView: View {
                 // surface; the coding workspace slides in on the right when
                 // the model creates files (most relevant in Agent mode).
                 let mode: EaonMode = { if case .mode(let m) = selection { return m } else { return .chat } }()
-                HStack(spacing: 0) {
-                    ChatHomeView(
-                        viewModel: chatViewModel,
-                        isSidebarCollapsed: sidebarCollapsed,
-                        onExpandSidebar: { toggleSidebar() },
-                        onOpenProviderSettings: { selectionId in
-                            settingsInitialSelectionId = selectionId
-                            showingSettings = true
-                        },
-                        mode: mode,
-                        onModeChange: switchMode
-                    )
-                    if chatViewModel.isWorkspaceOpen {
-                        CodeWorkspacePanel(viewModel: chatViewModel)
-                            .frame(width: 440)
-                            .floatingWorkspacePanel(colors: colors)
-                            .transition(.move(edge: .trailing))
+                GeometryReader { geo in
+                    HStack(spacing: 0) {
+                        ChatHomeView(
+                            viewModel: chatViewModel,
+                            isSidebarCollapsed: sidebarCollapsed,
+                            onExpandSidebar: { toggleSidebar() },
+                            onOpenProviderSettings: { selectionId in
+                                selection = .settings(selectionId)
+                            },
+                            mode: mode,
+                            onModeChange: switchMode
+                        )
+                        if chatViewModel.isWorkspaceOpen {
+                            let panelWidth = Self.clampedWorkspaceWidth(workspacePanelWidth, available: geo.size.width)
+                            CodeWorkspacePanel(viewModel: chatViewModel)
+                                .frame(width: panelWidth)
+                                .floatingWorkspacePanel(colors: colors)
+                                .overlay(alignment: .leading) {
+                                    WorkspaceResizeHandle(
+                                        width: $workspacePanelWidth,
+                                        currentWidth: panelWidth,
+                                        available: geo.size.width
+                                    )
+                                }
+                                .transition(.move(edge: .trailing))
+                        }
                     }
                 }
-            case .mode(.claw):
-                ClawHomeView(
-                    viewModel: chatViewModel,
+            case .mode(.code):
+                EaonCodeHomeView(
                     isSidebarCollapsed: sidebarCollapsed,
                     onExpandSidebar: { toggleSidebar() },
-                    onOpenProviderSettings: { selectionId in
-                        settingsInitialSelectionId = selectionId
-                        showingSettings = true
-                    },
-                    onModeChange: switchMode
+                    onExit: {
+                        chatViewModel.enterMode(.chat)
+                        switchMode(.chat)
+                    }
                 )
+            case .settings(let initialId):
+                // `.id` keyed on the deep-link target so opening Settings on
+                // a *specific* category (a provider gear, search palette,
+                // onboarding) rebuilds with that as its landing selection,
+                // instead of reusing a prior instance still sitting on
+                // General. Plain "open Settings" is .settings(nil) → General.
+                SettingsRootView(
+                    chatViewModel: chatViewModel,
+                    initialSelectionId: initialId,
+                    onExit: { selection = .mode(chatViewModel.currentMode) }
+                )
+                .id(initialId ?? "general")
             case .compare:
                 ModelCompareView(availableModels: chatViewModel.aquaOnlyChatModels)
             case .feature(.projects):
@@ -347,7 +416,21 @@ struct RootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// The workspace panel's usable width band: never narrower than 340
+    /// (the explorer + editor stop being usable below that), never so wide
+    /// the chat column drops under ~420 (the composer and message bubbles
+    /// need real room). Applied to whatever width the user last dragged,
+    /// so shrinking the window squeezes the panel rather than the chat.
+    static func clampedWorkspaceWidth(_ requested: Double, available: CGFloat) -> CGFloat {
+        let maxWidth = max(340, Double(available) - 420)
+        return CGFloat(min(max(requested, 340), maxWidth))
+    }
+
     private func toggleSidebar() {
+        // Refuse to collapse while Settings is showing — see `isInSettings`.
+        // Expanding is always allowed (a collapsed sidebar + Settings, e.g.
+        // reached via ⌘K, still needs a way back open).
+        if isInSettings, !sidebarCollapsed { return }
         withAnimation(.linear(duration: 0.2)) {
             sidebarCollapsed.toggle()
         }
@@ -355,13 +438,13 @@ struct RootView: View {
 
     private func newChat() {
         chatViewModel.startNewChat()
-        // Keep whatever mode the user is in — a new chat inside Eaon Claw
-        // should stay Eaon Claw, not drop back to plain Chat.
+        // Keep whatever mode the user is in — a new chat inside Agent mode
+        // should stay Agent mode, not drop back to plain Chat.
         selection = .mode(chatViewModel.currentMode)
     }
 
-    /// The mode switcher (composer bar, plus Eaon Claw's enable-gate screen)
-    /// only has a view onto `viewModel.currentMode` — it can't see
+    /// The mode switcher (composer bar) only has a view onto
+    /// `viewModel.currentMode` — it can't see
     /// `selection`, which is what actually decides which top-level view this
     /// window shows. This is the one place that keeps both in sync.
     private func switchMode(_ mode: EaonMode) {
@@ -382,6 +465,55 @@ struct RootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
+    }
+}
+
+/// The invisible grab strip on the workspace panel's leading edge — drag
+/// to resize, the standard macOS split-view affordance. Sits in the gutter
+/// between the chat column and the floating panel card (the overlay is
+/// applied after the card's outer padding), showing a small grip bar on
+/// hover so the affordance is discoverable without adding permanent chrome.
+private struct WorkspaceResizeHandle: View {
+    @Environment(\.themeColors) private var colors
+    /// The persisted width preference this drag writes through to.
+    @Binding var width: Double
+    /// The width actually on screen right now (post-clamp) — the drag's
+    /// base, so grabbing a panel that was clamped smaller than its saved
+    /// preference doesn't jump to the stale saved value on the first tick.
+    let currentWidth: CGFloat
+    let available: CGFloat
+
+    @State private var dragBaseWidth: CGFloat?
+    @State private var isHovering = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 11)
+            .overlay {
+                if isHovering || dragBaseWidth != nil {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(colors.borderMedium)
+                        .frame(width: 3, height: 44)
+                }
+            }
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                isHovering = hovering
+                if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        let base = dragBaseWidth ?? currentWidth
+                        if dragBaseWidth == nil { dragBaseWidth = currentWidth }
+                        // The panel hangs off the RIGHT edge, so dragging its
+                        // leading handle left (negative translation) widens it.
+                        let proposed = Double(base - value.translation.width)
+                        width = min(max(proposed, 340), max(340, Double(available) - 420))
+                    }
+                    .onEnded { _ in dragBaseWidth = nil }
+            )
     }
 }
 

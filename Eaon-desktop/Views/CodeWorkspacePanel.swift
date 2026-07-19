@@ -159,6 +159,7 @@ struct CodeWorkspacePanel: View {
             HStack(spacing: 4) {
                 Image(systemName: runner.isRunning ? "stop.fill" : "play.fill")
                     .font(.system(size: 9, weight: .bold))
+                    .iconHoverEffect(for: runner.isRunning ? "stop.fill" : "play.fill")
                 Text(runner.isRunning ? "Stop" : "Run")
                     .font(.system(size: 11, weight: .semibold))
             }
@@ -556,6 +557,7 @@ struct CodeWorkspacePanel: View {
                     HStack(spacing: 4) {
                         Image(systemName: "terminal")
                             .font(.system(size: 9))
+                            .iconHoverEffect(for: "terminal")
                         Text("Console")
                     }
                     .foregroundStyle(showConsole && mode == .code ? colors.textPrimary : colors.textTertiary)
@@ -636,6 +638,7 @@ private struct TreeRowButton: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .semibold))
                         .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                        .iconHoverEffect(for: "chevron.right")
                         .foregroundStyle(colors.textTertiary)
                         .frame(width: 10)
                     Image(systemName: isCollapsed ? "folder" : "folder.fill")
@@ -686,6 +689,7 @@ private struct PanelIconButton: View {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(colors.textSecondary)
+                .iconHoverEffect(for: systemName)
                 .frame(width: 24, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)

@@ -3,6 +3,125 @@
 All notable changes to Eaon are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/) — newest release on top.
 
+## [2026.3.0] — 2026-07-18
+
+### Added
+- Eaon is now on Windows and Linux — a ground-up rebuild on Tauri (a
+  Rust core with a web UI, the same cross-platform approach Jan.ai
+  uses) that reaches real feature parity with the Mac app: Agent mode
+  with the full coding toolset and the same safety model, Skills,
+  Memory, MCP plugins (including local `npx`-style servers, which the
+  Mac app doesn't support yet), image generation, live web search,
+  attachments, per-model sampling parameters, a Local API Server, a
+  network proxy setting, read-aloud, and first-run onboarding.
+- Agent mode can now work inside an existing project instead of only
+  building fresh ones — it can search your codebase by keyword/regex
+  and find files by name before editing, and can pause mid-task to ask
+  you a real clarifying question (clickable options or free text)
+  instead of guessing.
+- Eaon Code — a new mode with a real embedded terminal in the app, for
+  driving the standalone Eaon CLI tool when it's installed; falls back
+  to your normal shell otherwise.
+- Quick Assistant — a small floating chat panel you can summon from the
+  menu bar or a global hotkey without opening the main window, sharing
+  your model, instructions, and settings. "Continue in Eaon" hands the
+  conversation to the main app.
+- Replies can now be read aloud — a speaker icon on any assistant
+  message uses your Mac's built-in voices, no account or network
+  needed.
+- Settings → Network — an optional HTTP/HTTPS proxy for all of Eaon's
+  outbound traffic, with a connection test.
+- Settings → Model Parameters — temperature, top-p, max output tokens,
+  and frequency/presence penalties, each opt-in per request; applies
+  to any model, hosted or local.
+- The "Thinking" and research-template items in the composer's "+"
+  menu now actually work (previously silent no-ops) — Thinking toggles
+  real extended reasoning on local Ollama models that support it, and
+  the research templates insert a fillable prompt.
+- Any chat can now generate an image mid-conversation without switching
+  to a dedicated image model, using whichever image backend you have
+  set up.
+- More control over local llama.cpp models: a tunable context window
+  (Compact/Balanced/Large/Huge, replacing llama.cpp's own default of
+  the model's full trained context) and a Flash Attention switch,
+  alongside the existing CPU/GPU mode.
+- A live memory badge on loaded local models, with a one-click eject to
+  free RAM immediately instead of waiting out the keep-alive timer.
+- Hugging Face model browsing redesigned — each result is a card with
+  a one-click default download plus an expandable list of every real
+  quantization, each tagged Small/Balanced/Large with its own fit
+  check; oversized downloads now ask for confirmation first.
+- Settings → Memory → "Import from another AI" — paste a memory list
+  copied from ChatGPT, Claude, or Gemini and Eaon parses and imports it
+  locally, with a report of what was added versus skipped as a
+  duplicate or junk.
+- Your own messages can now be edited and resent — everything after
+  that point is discarded and regenerated.
+- A first-run onboarding flow — three skippable steps covering the
+  app's modes and how to get started, running locally or with an API
+  key.
+- A real font picker — Settings → Appearance → Font, with 16 bundled
+  typefaces plus anything already installed on your Mac, applied to
+  both UI text and code.
+- Up to three of your most recent conversations now appear as
+  quick-open shortcuts on the empty chat screen.
+- Starting a new chat or switching conversations no longer interrupts
+  a reply still streaming elsewhere — each keeps generating in the
+  background, marked by a small pulsing dot in the sidebar.
+- Update downloads are now integrity-checked against a SHA-256 hash
+  before installing, when the update manifest provides one.
+
+### Changed
+- Device Control is now a toggle inside Agent mode instead of a
+  separate "Eaon Claw" mode — turn it on in Settings to give Agent the
+  full file/app/browser/AppleScript toolkit. Same guardrails as before
+  (asks first, Trash not delete, no sudo, no passwords or purchases).
+- Image Studio is no longer a separate mode — image generation still
+  works the same way, just through the model picker (and now
+  mid-chat, see Added) instead of a dedicated tab.
+- Settings is now a full page instead of a popup modal, reorganized
+  into General/Appearance/Shortcuts, Assistant, Tools, and System
+  groups.
+- Memory now only surfaces facts relevant to what you're currently
+  discussing (up to 10, relevance-ranked) instead of injecting
+  everything it knows into every message; your last 30 days of
+  activity still always rides along.
+- If your accent color is set to "Default," it now spreads a 7-color
+  palette across different areas of the UI instead of one flat color —
+  pick any other color in Settings → Appearance if you'd rather keep a
+  single flat accent. New installs default to a plain white accent
+  instead.
+- On-device toggle switches now render a fixed green in their "on"
+  state everywhere, instead of following whatever accent color is
+  selected.
+- A few more leftover "Aqua" references renamed to "Eaon" across
+  Settings and in-chat text.
+
+### Fixed
+- The regenerate button on a reply did nothing — it now actually
+  discards the last reply and generates a new one.
+- Photos added through the general "Add photos & files" picker weren't
+  being sent as images — the model only ever saw a filename note, no
+  thumbnail, unless you used the dedicated image picker. Now any
+  picked file is sent as what it actually is.
+- A DNS-rebinding vulnerability in the Local API Server that could let
+  a malicious webpage reach it from your browser — closed wildcard
+  CORS, added Host-header and Origin validation, and made the API key
+  comparison constant-time.
+- Small local models could take a long time to even start responding —
+  llama.cpp was sizing its memory cache to the model's full trained
+  context by default (often 128K–256K, sometimes multiple gigabytes)
+  even for tiny models; now defaults to a much smaller, adjustable
+  window.
+- The app could stutter while a fast local model streamed a reply —
+  text rendering and local server logs are now both batched to a
+  smooth, fixed rate instead of updating as fast as tokens arrived.
+- The traffic-light window buttons could silently drift out of
+  position over time — they now continuously self-heal instead of
+  only repositioning on specific window events.
+- Toggle switches going nearly invisible when the accent color was set
+  to white (the new default).
+
 ## [2026.2.0] — 2026-07-14
 
 ### Added

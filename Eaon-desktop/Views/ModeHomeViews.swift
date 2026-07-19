@@ -33,10 +33,7 @@ private struct WindowDragBlocker: NSViewRepresentable {
 }
 
 /// The compact pill that replaced the sidebar's mode rows — lives in the
-/// composer bar, next to the attach button. Shown a second time at the top
-/// of Eaon Claw's enable card, since that one renders no composer of its
-/// own: without it, landing on "Enable Eaon Claw" with nothing configured
-/// yet would be a dead end with no way back to Chat.
+/// composer bar, next to the attach button.
 ///
 /// Both a tap and a press-and-slide work: a `DragGesture(minimumDistance:
 /// 0)` covers both, since a plain tap is just a drag that never moves. While
@@ -61,14 +58,24 @@ struct ModeSegmentedControl: View {
     /// on `currentMode`'s own frame.
     @State private var liveDragX: CGFloat?
 
-    /// Short enough that all three fit comfortably inline — the full name
-    /// ("Eaon Claw") still appears in that mode's own empty state and
-    /// enable card, so nothing here is the only place it's spelled out.
     private func label(for mode: EaonMode) -> String {
         switch mode {
         case .chat: return "Chat"
         case .agent: return "Agent"
-        case .claw: return "Claw"
+        case .code: return "Code"
+        }
+    }
+
+    /// Hover explanation for each mode — new users have no way to tell Chat,
+    /// Agent, and Code apart from the three-word labels alone.
+    private func tooltip(for mode: EaonMode) -> String {
+        switch mode {
+        case .chat:
+            return "Chat — just talk and ask anything. Never touches your files or runs commands."
+        case .agent:
+            return "Agent — writes, runs, and debugs real code on your Mac, and (with Device Control on) organizes files, drives apps, and researches for you."
+        case .code:
+            return "Code — a real terminal running Eaon's CLI agent, for git, test runners, and the developer workflows a chat window doesn't fit."
         }
     }
 
@@ -76,7 +83,7 @@ struct ModeSegmentedControl: View {
     /// the live drag's width/height (a slid pill still borrows whichever
     /// segment it's currently over) and to decide where a release settles.
     private func nearestMode(toX x: CGFloat) -> EaonMode {
-        EaonMode.allCases.min { a, b in
+        EaonMode.switcherCases.min { a, b in
             abs((segmentFrames[a]?.midX ?? .infinity) - x) < abs((segmentFrames[b]?.midX ?? .infinity) - x)
         } ?? currentMode
     }
@@ -91,7 +98,7 @@ struct ModeSegmentedControl: View {
             }
 
             HStack(spacing: 2) {
-                ForEach(EaonMode.allCases) { mode in
+                ForEach(EaonMode.switcherCases) { mode in
                     let isActive = mode == currentMode
                     HStack(spacing: 4) {
                         Image(systemName: mode.icon)
@@ -110,6 +117,7 @@ struct ModeSegmentedControl: View {
                             )
                         }
                     )
+                    .help(tooltip(for: mode))
                 }
             }
         }
@@ -166,174 +174,52 @@ struct ModeSegmentedControl: View {
     }
 }
 
-// MARK: - Eaon Claw
+// MARK: - Device control opt-in
 
-/// Eaon Claw's surface. Until the capability is enabled it shows a single,
-/// honest enable card (this is the "one-click" setup — no hunting through
-/// Settings); once enabled it's the normal chat surface with Claw's tools,
-/// prompt, and longer agent loop active (all wired in `ChatViewModel` by
-/// `currentMode == .claw`).
-struct ClawHomeView: View {
-    @Bindable var viewModel: ChatViewModel
-    @Bindable private var claw = DesktopControlStore.shared
-    var isSidebarCollapsed: Bool = false
-    var onExpandSidebar: () -> Void = {}
-    var onOpenProviderSettings: (String) -> Void = { _ in }
-    var onModeChange: (EaonMode) -> Void = { _ in }
-
-    var body: some View {
-        if claw.isEnabled {
-            ChatHomeView(
-                viewModel: viewModel,
-                isSidebarCollapsed: isSidebarCollapsed,
-                onExpandSidebar: onExpandSidebar,
-                onOpenProviderSettings: onOpenProviderSettings,
-                mode: .claw,
-                onModeChange: onModeChange
-            )
-        } else {
-            // The enable card has no composer of its own, so its mode
-            // switcher has to do both jobs a normal composer-embedded one
-            // splits between ChatComposer and this view's parent: update
-            // the view model's real mode AND tell RootView which surface to
-            // show. Skipping the first would leave `viewModel.currentMode`
-            // out of sync with what's on screen.
-            ClawEnableView(onModeChange: { mode in
-                viewModel.enterMode(mode)
-                onModeChange(mode)
-            }) { claw.isEnabled = true }
-        }
-    }
-}
-
-/// The one-click enable card — states plainly what Eaon Claw can do and the
-/// guardrails that hold regardless, then enables the capability on a single
-/// tap. Full disclosure up front because this is the one mode that reaches
-/// out of the app and into the real Mac.
-struct ClawEnableView: View {
+/// A small, dismissible hint shown inside Agent mode while device control
+/// (formerly Eaon Claw's own separate mode, with its own full-screen enable
+/// gate) is still off. Agent already works fully as a coding agent without
+/// it, so this is an invitation, not a gate — unlike the old Claw enable
+/// card, it never blocks the chat surface underneath. Dismissal is
+/// persisted so it doesn't nag on every launch once someone's made their
+/// choice either way.
+struct DeviceControlOptInHint: View {
     @Environment(\.themeColors) private var colors
-    /// Not enabled yet, so there's no composer here to switch modes from —
-    /// this repeats the same switcher at the top so the screen is never a
-    /// dead end.
-    var onModeChange: (EaonMode) -> Void = { _ in }
-    let onEnable: () -> Void
-
-    private let canDo = [
-        ("folder.fill", "Organize files", "List, move, rename, and tidy your files and folders."),
-        ("terminal.fill", "Run commands", "Run shell commands to get real work done (no sudo)."),
-        ("macwindow", "Drive apps", "Open, quit, and control apps like Safari, Finder, and Notes."),
-        ("globe", "Use the browser", "Open pages, read them, and click through multi-step web tasks."),
-    ]
-
-    private let guardrails = [
-        "Asks before every change — nothing happens without your OK.",
-        "Deletes go to the Trash. There's no permanent delete.",
-        "No admin/sudo, no touching system files or settings.",
-        "Never enters passwords, buys anything, or moves money.",
-    ]
+    @AppStorage("eaon_device_control_hint_dismissed") private var dismissed = false
+    let onOpenSettings: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                ModeSegmentedControl(currentMode: .claw, onSelect: onModeChange)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-
-            ScrollView {
-            VStack(spacing: 0) {
-                Spacer(minLength: 40)
-
-                Image(systemName: EaonMode.claw.icon)
-                    .font(.system(size: 40, weight: .semibold))
-                    .foregroundStyle(AppearanceSettings.shared.accentColor)
-                    .padding(.bottom, 14)
-
-                Text("Eaon Claw")
-                    .font(AppFont.mono(30, weight: .bold))
-                    .foregroundStyle(colors.textPrimary)
-                    .padding(.bottom, 6)
-
-                Text("Let Eaon control your Mac and browser to carry out real, multi-step tasks — the on-device agent, one click away.")
-                    .font(AppFont.sans(14))
+        if !dismissed {
+            HStack(spacing: 10) {
+                Image(systemName: "macwindow")
+                    .font(.system(size: 12))
                     .foregroundStyle(colors.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 460)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.bottom, 24)
-
-                VStack(spacing: 10) {
-                    ForEach(canDo, id: \.0) { icon, title, detail in
-                        HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: icon)
-                                .font(.system(size: 15))
-                                .foregroundStyle(colors.textSecondary)
-                                .frame(width: 22)
-                                .padding(.top, 2)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(title)
-                                    .font(AppFont.mono(13, weight: .semibold))
-                                    .foregroundStyle(colors.textPrimary)
-                                Text(detail)
-                                    .font(AppFont.sans(12))
-                                    .foregroundStyle(colors.textSecondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                    }
-                }
-                .frame(maxWidth: 460)
-                .padding(16)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(colors.backgroundChip.opacity(0.5)))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.borderSubtle, lineWidth: 1))
-                .padding(.bottom, 16)
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("The rules Eaon Claw always follows")
-                        .font(AppFont.mono(12, weight: .semibold))
+                Text("Turn on Device Control so Agent can also organize files, drive apps, and use the browser — not just write code.")
+                    .font(AppFont.sans(12))
+                    .foregroundStyle(colors.textSecondary)
+                    .lineLimit(2)
+                Spacer(minLength: 8)
+                Button("Turn On", action: onOpenSettings)
+                    .buttonStyle(.plain)
+                    .font(AppFont.mono(11.5, weight: .semibold))
+                    .foregroundStyle(AppearanceSettings.shared.accentColor)
+                Button {
+                    dismissed = true
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(colors.textTertiary)
-                        .padding(.bottom, 2)
-                    ForEach(guardrails, id: \.self) { rule in
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "checkmark.shield.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(colors.textSecondary)
-                                .padding(.top, 1)
-                            Text(rule)
-                                .font(AppFont.sans(12))
-                                .foregroundStyle(colors.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-                .frame(maxWidth: 460, alignment: .leading)
-                .padding(.bottom, 24)
-
-                Button(action: onEnable) {
-                    Text("Enable Eaon Claw")
-                        .font(AppFont.mono(14, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 22)
-                        .padding(.vertical, 11)
-                        .background(Capsule().fill(AppearanceSettings.shared.accentColor))
+                        .iconHoverEffect(for: "xmark")
                 }
                 .buttonStyle(.plain)
-
-                Text("You can turn this off anytime in Settings → Computer Control.")
-                    .font(AppFont.sans(11))
-                    .foregroundStyle(colors.textTertiary)
-                    .padding(.top, 12)
-
-                Spacer(minLength: 40)
+                .help("Don't show this again")
             }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 24)
-            .padding(.top, 40)
-            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(colors.backgroundChip.opacity(0.5)))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.borderSubtle, lineWidth: 1))
+            .padding(.horizontal, 20)
+            .padding(.top, 10)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(colors.backgroundPrimary)
     }
 }

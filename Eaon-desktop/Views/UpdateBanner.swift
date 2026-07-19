@@ -71,6 +71,7 @@ struct UpdateBanner: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(colors.textTertiary)
+                        .iconHoverEffect(for: "xmark")
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
                 }

@@ -10,6 +10,7 @@ struct MemorySettingsView: View {
     @Bindable var chatViewModel: ChatViewModel
     @State private var draft = ""
     @State private var showingClearConfirm = false
+    @State private var showingImportSheet = false
     /// Non-nil while the learn-from-file confirmation is up — the second
     /// half of that flow's heavy consent (the explicit file pick being the
     /// first). Holds the picked file so Confirm knows what to act on.
@@ -41,6 +42,7 @@ struct MemorySettingsView: View {
                     toggleCard
                     backfillCard
                     fileLearnCard
+                    importCard
                     addCard
                     memoriesCard
                 }
@@ -50,6 +52,9 @@ struct MemorySettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(colors.backgroundPrimary)
+        .sheet(isPresented: $showingImportSheet) {
+            ImportMemorySheet()
+        }
         .alert("Clear all memories?", isPresented: $showingClearConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Clear All", role: .destructive) { store.clearAll() }
@@ -89,7 +94,7 @@ struct MemorySettingsView: View {
                     Toggle("", isOn: $store.isEnabled)
                         .labelsHidden()
                         .toggleStyle(.switch)
-                        .tint(AppearanceSettings.shared.accentColor)
+                        .tint(AppearanceSettings.toggleTint)
                 }
                 .padding(16)
 
@@ -115,7 +120,7 @@ struct MemorySettingsView: View {
                     Toggle("", isOn: $store.isAutoLearnEnabled)
                         .labelsHidden()
                         .toggleStyle(.switch)
-                        .tint(AppearanceSettings.shared.accentColor)
+                        .tint(AppearanceSettings.toggleTint)
                         .disabled(!store.isEnabled)
                 }
                 .padding(16)
@@ -137,7 +142,7 @@ struct MemorySettingsView: View {
                     Toggle("", isOn: $store.isPluginLearnEnabled)
                         .labelsHidden()
                         .toggleStyle(.switch)
-                        .tint(AppearanceSettings.shared.accentColor)
+                        .tint(AppearanceSettings.toggleTint)
                         .disabled(!store.isEnabled || !store.isAutoLearnEnabled)
                 }
                 .padding(16)
@@ -238,6 +243,32 @@ struct MemorySettingsView: View {
                 }
                 .padding(16)
             }
+        }
+    }
+
+    /// Bring over what another AI already knows — paste its memory list,
+    /// no model call involved (see `MemoryParsing.parseProviderMemoryList`).
+    /// Not gated on `store.isEnabled` (unlike the two model-powered learn
+    /// cards above): like the manual add field, this is the user explicitly
+    /// handing facts over, and it works offline.
+    private var importCard: some View {
+        SettingsCard {
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Import from another AI")
+                        .font(AppFont.mono(13, weight: .semibold))
+                        .foregroundColor(colors.textPrimary)
+                    Text("Bring over what ChatGPT, Claude, or Gemini already remembers about you — copy your memory list there, paste it here, and everything imported appears below.")
+                        .font(AppFont.sans(11))
+                        .foregroundColor(colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button("Import…") { showingImportSheet = true }
+                    .buttonStyle(.bordered)
+                    .disabled(store.isFull)
+            }
+            .padding(16)
         }
     }
 
@@ -344,6 +375,7 @@ struct MemorySettingsView: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(colors.textTertiary)
+                    .iconHoverEffect(for: "xmark")
             }
             .buttonStyle(.plain)
         }
@@ -355,5 +387,132 @@ struct MemorySettingsView: View {
         guard store.addManual(draft) else { return }
         draft = ""
         isFocused = true
+    }
+}
+
+/// The paste-and-import flow for another AI's memory of you. Everything
+/// happens locally and deterministically — the pasted text is parsed
+/// line-by-line (`MemoryParsing.parseProviderMemoryList`), passed through
+/// the same junk gate and duplicate check automatic extraction uses, and
+/// the outcome is reported number by number rather than a bare "done."
+private struct ImportMemorySheet: View {
+    @Environment(\.themeColors) private var colors
+    @Environment(\.dismiss) private var dismiss
+    @Bindable private var store = MemoryStore.shared
+
+    @State private var source: ImportSource = .chatGPT
+    @State private var pasted = ""
+    @State private var resultMessage: String?
+
+    private enum ImportSource: String, CaseIterable, Identifiable {
+        case chatGPT = "ChatGPT"
+        case claude = "Claude"
+        case gemini = "Gemini"
+        case other = "Other"
+
+        var id: String { rawValue }
+
+        var guidance: String {
+            switch self {
+            case .chatGPT:
+                return "In ChatGPT: Settings → Personalization → Memory → Manage, and copy the list. Or just ask it \"List everything you remember about me as short bullet points\" and copy the reply."
+            case .claude:
+                return "Ask Claude \"List everything you remember about me as short bullet points\" and copy its reply."
+            case .gemini:
+                return "On gemini.google.com: Settings → Saved info, and copy the list. Or ask Gemini to list everything it's saved about you."
+            case .other:
+                return "Paste any list of facts about you — one per line works best."
+            }
+        }
+    }
+
+    private var candidates: [String] {
+        MemoryParsing.parseProviderMemoryList(pasted)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Import Memory")
+                .font(AppFont.mono(16, weight: .bold))
+                .foregroundColor(colors.textPrimary)
+
+            Picker("", selection: $source) {
+                ForEach(ImportSource.allCases) { candidate in
+                    Text(candidate.rawValue).tag(candidate)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text(source.guidance)
+                .font(AppFont.sans(11))
+                .foregroundColor(colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextEditor(text: $pasted)
+                .font(AppFont.sans(12.5))
+                .foregroundColor(colors.textPrimary)
+                .scrollContentBackground(.hidden)
+                .frame(height: 180)
+                .padding(8)
+                .background(colors.backgroundInput)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(colors.borderSubtle, lineWidth: 1)
+                )
+                .overlay(alignment: .topLeading) {
+                    if pasted.isEmpty {
+                        Text("Paste your memory list here…")
+                            .font(AppFont.sans(12.5))
+                            .foregroundColor(colors.textTertiary)
+                            .padding(.top, 14)
+                            .padding(.leading, 13)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+            if let resultMessage {
+                Text(resultMessage)
+                    .font(AppFont.mono(11))
+                    .foregroundColor(colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !candidates.isEmpty {
+                Text("Found \(candidates.count) item\(candidates.count == 1 ? "" : "s") to import.")
+                    .font(AppFont.mono(11))
+                    .foregroundColor(colors.textSecondary)
+            }
+
+            HStack {
+                Spacer()
+                Button(resultMessage == nil ? "Cancel" : "Done") { dismiss() }
+                    .buttonStyle(.plain)
+                    .font(AppFont.mono(13, weight: .medium))
+                    .foregroundColor(colors.textSecondary)
+                if resultMessage == nil {
+                    AccentButton(title: "Import", isDisabled: candidates.isEmpty) {
+                        runImport()
+                    }
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 480)
+        .background(colors.backgroundPopover)
+    }
+
+    private func runImport() {
+        let outcome = store.importFacts(candidates)
+        var parts: [String] = ["Imported \(outcome.added) memor\(outcome.added == 1 ? "y" : "ies")."]
+        if outcome.skippedDuplicates > 0 {
+            parts.append("Skipped \(outcome.skippedDuplicates) already remembered.")
+        }
+        if outcome.skippedFiltered > 0 {
+            parts.append("Skipped \(outcome.skippedFiltered) that didn't look like durable facts about you.")
+        }
+        if outcome.skippedOverCap > 0 {
+            parts.append("Memory is full — \(outcome.skippedOverCap) didn't fit.")
+        }
+        resultMessage = parts.joined(separator: " ")
     }
 }

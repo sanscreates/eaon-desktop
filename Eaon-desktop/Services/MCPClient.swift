@@ -265,7 +265,7 @@ actor MCPClient {
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await AppHTTP.session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw MCPError.malformedResponse }
 
         // The server may assign a session on any response — capture it

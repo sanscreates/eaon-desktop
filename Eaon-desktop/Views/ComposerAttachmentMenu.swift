@@ -1,11 +1,48 @@
 import SwiftUI
 
+/// Prompt templates the "+" menu inserts directly into the composer instead
+/// of sending anything — the user still reviews/edits/fills in the
+/// bracketed parts before hitting send. Namespaced here (not private) so
+/// `ChatComposer` can wire them straight into `viewModel.inputText` without
+/// this view needing to know about the view model at all.
+enum ComposerPromptTemplate {
+    static let deepResearch = """
+    Research [topic] in depth. Cover:
+    1. [key question or angle]
+    2. [key question or angle]
+    3. [key question or angle]
+
+    Prioritize recent, credible sources, and call out where sources disagree. Give me a clear synthesis, not just a list of links.
+    """
+
+    static let shoppingResearch = """
+    Help me find the best [product or category] for [use case]. My budget is [amount].
+
+    It should have:
+    - [must-have feature]
+    - [must-have feature]
+
+    Compare at least 3 real current options with prices, pros/cons, and a clear recommendation.
+    """
+}
+
 struct ComposerAttachmentMenu: View {
     @Environment(\.themeColors) private var colors
     let onPickImage: () -> Void
     let onPickFile: () -> Void
     let onPasteImage: () -> Void
     var onComingSoon: (String) -> Void = { _ in }
+    /// Inserts a prompt template's text into the composer — "Deep research"
+    /// and "Shopping research" use this instead of the coming-soon stub;
+    /// nothing is sent, the user still reviews and fills in the brackets.
+    var onInsertTemplate: (String) -> Void = { _ in }
+    /// Whether the current model actually supports the `think` toggle
+    /// (local Ollama models that advertised it via `/api/tags`) — Aqua and
+    /// non-thinking local models get an explanatory tap instead of a
+    /// toggle that would silently do nothing.
+    var isThinkingAvailable: Bool = false
+    var thinkingEnabled: Bool = true
+    var onToggleThinking: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -18,9 +55,19 @@ struct ComposerAttachmentMenu: View {
                 .padding(.vertical, 4)
 
             AttachmentMenuRow(icon: "photo", title: "Create image") { onComingSoon("Image generation") }
-            AttachmentMenuRow(icon: "lightbulb", title: "Thinking") { onComingSoon("Extended thinking") }
-            AttachmentMenuRow(icon: "binoculars", title: "Deep research") { onComingSoon("Deep research") }
-            AttachmentMenuRow(icon: "bag", title: "Shopping research") { onComingSoon("Shopping research") }
+            AttachmentMenuRow(
+                icon: "lightbulb",
+                title: isThinkingAvailable ? "Thinking" : "Thinking (unavailable)",
+                isChecked: isThinkingAvailable && thinkingEnabled
+            ) {
+                if isThinkingAvailable {
+                    onToggleThinking()
+                } else {
+                    onComingSoon("Extended thinking isn't supported by this model")
+                }
+            }
+            AttachmentMenuRow(icon: "binoculars", title: "Deep research") { onInsertTemplate(ComposerPromptTemplate.deepResearch) }
+            AttachmentMenuRow(icon: "bag", title: "Shopping research") { onInsertTemplate(ComposerPromptTemplate.shoppingResearch) }
             AttachmentMenuRow(icon: "ellipsis", title: "More", showsChevron: true) { onComingSoon("More tools") }
         }
         .padding(.vertical, 6)
@@ -35,6 +82,7 @@ private struct AttachmentMenuRow: View {
     let icon: String
     let title: String
     var showsChevron: Bool = false
+    var isChecked: Bool = false
     var action: () -> Void = {}
 
     @State private var isHovered = false
@@ -45,6 +93,7 @@ private struct AttachmentMenuRow: View {
                 Image(systemName: icon)
                     .font(.system(size: 16, weight: .regular))
                     .foregroundStyle(colors.textPrimary.opacity(0.85))
+                    .iconHoverEffect(for: icon)
                     .frame(width: 22)
 
                 Text(title)
@@ -53,10 +102,17 @@ private struct AttachmentMenuRow: View {
 
                 Spacer(minLength: 0)
 
+                if isChecked {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(colors.textPrimary.opacity(0.85))
+                }
+
                 if showsChevron {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(colors.textTertiary)
+                        .iconHoverEffect(for: "chevron.right")
                 }
             }
             .padding(.horizontal, 12)
@@ -130,6 +186,7 @@ private struct PendingAttachmentChip: View {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 14))
                     .foregroundStyle(colors.textSecondary)
+                    .iconHoverEffect(for: "xmark.circle.fill")
             }
             .buttonStyle(.plain)
         }

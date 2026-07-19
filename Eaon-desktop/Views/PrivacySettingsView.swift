@@ -175,7 +175,7 @@ struct PrivacySettingsView: View {
                 privacyRow(
                     icon: "magnifyingglass",
                     title: "Web search",
-                    detail: "When a reply searches the web, that query goes to MIKLIUM (miklium.vercel.app) — a free, independent search API, not Aqua and not any account. Off switch below."
+                    detail: "When a reply searches the web, that query goes to MIKLIUM (miklium.vercel.app) — a free, independent search API, not Eaon and not any account. Off switch below."
                 )
                 Divider().overlay(colors.borderSubtle)
                 privacyRow(
@@ -213,7 +213,7 @@ struct PrivacySettingsView: View {
                 Toggle("", isOn: $alwaysAllowStore.isEnabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .tint(AppearanceSettings.shared.accentColor)
+                    .tint(AppearanceSettings.toggleTint)
             }
             .padding(18)
         }
@@ -244,7 +244,7 @@ struct PrivacySettingsView: View {
                 Toggle("", isOn: $webSearchStore.isEnabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .tint(AppearanceSettings.shared.accentColor)
+                    .tint(AppearanceSettings.toggleTint)
             }
             .padding(18)
         }
@@ -286,6 +286,7 @@ struct PrivacySettingsView: View {
                     HStack(spacing: 5) {
                         Text("eaon.dev")
                         Image(systemName: "arrow.up.right")
+                            .iconHoverEffect(for: "arrow.up.right")
                     }
                     .font(AppFont.mono(12, weight: .medium))
                     .foregroundColor(colors.link)

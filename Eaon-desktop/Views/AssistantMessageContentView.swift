@@ -294,6 +294,7 @@ struct WorkspaceFileCard: View {
                 Image(systemName: WorkspaceFileIcon.systemName(forPath: path))
                     .font(.system(size: 13))
                     .foregroundStyle(colors.textSecondary)
+                    .iconHoverEffect(for: WorkspaceFileIcon.systemName(forPath: path))
                     .frame(width: 30, height: 30)
                     .background(
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -320,6 +321,7 @@ struct WorkspaceFileCard: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(colors.textTertiary)
+                        .iconHoverEffect(for: "chevron.right")
                 }
             }
             .padding(10)
@@ -340,7 +342,11 @@ struct WorkspaceFileCard: View {
     }
 
     private var subtitle: String {
-        let lines = code.isEmpty ? 0 : code.components(separatedBy: "\n").count
+        // Byte-scan, not components(separatedBy:) — that allocated an array
+        // of every line just to count them, re-run on every typewriter tick
+        // while this card's file streams in.
+        var lines = code.isEmpty ? 0 : 1
+        for byte in code.utf8 where byte == UInt8(ascii: "\n") { lines += 1 }
         return isStreaming
             ? "Writing… \(lines) line\(lines == 1 ? "" : "s")"
             : "\(lines) line\(lines == 1 ? "" : "s") · Open in workspace"
@@ -815,6 +821,7 @@ struct ThinkingDisclosure: View {
                         .foregroundStyle(colors.textTertiary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .animation(.easeOut(duration: 0.16), value: isExpanded)
+                        .iconHoverEffect(for: "chevron.right")
 
                     if isInProgress {
                         WaveText(text: "Thinking…", font: AppFont.mono(13), color: colors.textSecondary)

@@ -73,7 +73,7 @@ enum MCPOAuth {
         probe.addValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         probe.httpBody = try JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": [String: Any]()])
 
-        let (_, response) = try await URLSession.shared.data(for: probe)
+        let (_, response) = try await AppHTTP.session.data(for: probe)
         guard let http = response as? HTTPURLResponse, http.statusCode == 401,
               let header = http.value(forHTTPHeaderField: "WWW-Authenticate"),
               let resourceMetadataURL = Self.extractResourceMetadataURL(from: header) else {
@@ -135,7 +135,7 @@ enum MCPOAuth {
     }
 
     private static func fetchJSON(_ url: URL) async throws -> [String: Any] {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await AppHTTP.session.data(from: url)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw OAuthError.discoveryFailed("\(url.absoluteString) didn't return valid metadata.")
@@ -168,7 +168,7 @@ enum MCPOAuth {
             "token_endpoint_auth_method": "none",
         ])
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await AppHTTP.session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let clientId = json["client_id"] as? String else {
@@ -250,7 +250,7 @@ enum MCPOAuth {
             .joined(separator: "&")
             .data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await AppHTTP.session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = json["access_token"] as? String else {

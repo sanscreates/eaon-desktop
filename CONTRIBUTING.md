@@ -1,10 +1,18 @@
 # Contributing to Eaon
 
-Thanks for considering it — here's what to know before opening a PR.
+Thanks for considering it — contributing here is meant to be easy. There's
+**no CLA to sign**, **no external dependencies to install**, and **no
+build tooling beyond Swift itself**. Clone, build, run, send a PR.
+
+New here? Look for issues labelled
+[`good first issue`](https://github.com/sanscreates/eaon-desktop/labels/good%20first%20issue),
+or just open an issue describing what you'd like to work on.
 
 ## Getting set up
 
 ```sh
+git clone https://github.com/sanscreates/eaon-desktop
+cd eaon-desktop
 swift build
 ./run.sh
 ```
@@ -38,7 +46,33 @@ Open a GitHub issue with what you expected, what happened, and macOS/Swift
 version if it's build-related. For anything security-sensitive, please
 don't open a public issue — reach out privately first.
 
-## License
+## License & sign-off
 
 By contributing, you agree your contribution is licensed under this
 project's [GNU GPL v3.0](LICENSE.md) license.
+
+Instead of a contributor agreement to sign, we use the lightweight
+**Developer Certificate of Origin (DCO)** — the same one the Linux kernel
+uses. It's a one-line promise that you wrote the change (or have the right
+to submit it), added automatically by committing with `-s`:
+
+```sh
+git commit -s -m "your message"
+```
+
+That appends a `Signed-off-by: Your Name <you@example.com>` line to the
+commit. That's it — no form, no account, no waiting. The full DCO text is
+below for reference; committing with `-s` is your agreement to it.
+
+> **Developer Certificate of Origin 1.1** — By making a contribution to
+> this project, I certify that: (a) the contribution was created in whole or
+> in part by me and I have the right to submit it under the open source
+> license indicated in the file; or (b) it is based upon previous work that,
+> to the best of my knowledge, is covered under an appropriate open source
+> license and I have the right under that license to submit it; or (c) it
+> was provided directly to me by some other person who certified (a), (b) or
+> (c) and I have not modified it. (d) I understand and agree that this
+> project and the contribution are public and that a record of the
+> contribution (including all personal information I submit with it) is
+> maintained indefinitely and may be redistributed consistent with this
+> project and its open source license.

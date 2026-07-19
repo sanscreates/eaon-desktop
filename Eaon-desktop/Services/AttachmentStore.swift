@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 enum AttachmentKind: String, Codable, Equatable {
     case image
@@ -41,9 +42,28 @@ enum AttachmentStore {
 
         return MessageAttachment(
             fileName: sourceURL.lastPathComponent,
-            kind: kind,
+            kind: resolvedKind(for: destination, hinted: kind),
             storedFileName: storedName
         )
+    }
+
+    /// The file's own real type decides `.image` vs `.file` — not which
+    /// button the user happened to click. `ComposerAttachmentMenu` has a
+    /// single "Add photos & files" row that always opens a general
+    /// (`.item`-type) picker, so an image chosen through it arrived here
+    /// hardcoded `kind: .file` purely because of which menu row it came
+    /// from: no thumbnail (`loadImage` refuses non-`.image` attachments),
+    /// and — the more consequential half — never sent to the model as a
+    /// real vision payload, only as a filename note. `hinted` is honored
+    /// only when the file's type genuinely can't be resolved (no
+    /// extension, unrecognized UTType), so a caller that already knows
+    /// definitively (the pasteboard/generated-image paths, which never go
+    /// through this function at all) is never second-guessed.
+    private static func resolvedKind(for url: URL, hinted: AttachmentKind) -> AttachmentKind {
+        guard let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType else {
+            return hinted
+        }
+        return type.conforms(to: .image) ? .image : hinted
     }
 
     static func importImageFromPasteboard() throws -> MessageAttachment? {

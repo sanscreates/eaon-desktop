@@ -70,7 +70,7 @@ struct ThemeColors: Equatable {
     // shifted down together so the same relative layering (sidebar recedes
     // darkest, elevated surfaces sit a shade above the stage) still holds.
     static let dark = ThemeColors(
-        backgroundPrimary: Color(hex: "#171717"),
+        backgroundPrimary: Color(hex: "#121212"),
         backgroundSidebar: Color(hex: "#101010"),
         backgroundElevated: Color(hex: "#242424"),
         backgroundPopover: Color(hex: "#242424"),

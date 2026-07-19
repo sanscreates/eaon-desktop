@@ -79,6 +79,7 @@ struct SkillsSettingsView: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
+                    .iconHoverEffect(for: icon)
                 Text(title)
             }
             .font(AppFont.mono(12, weight: .medium))
@@ -146,6 +147,7 @@ private struct SkillRow: View {
                     Image(systemName: "trash")
                         .font(.system(size: 12))
                         .foregroundStyle(colors.destructive)
+                        .iconHoverEffect(for: "trash")
                 }
                 .buttonStyle(.plain)
                 .help("Remove")
@@ -158,6 +160,7 @@ private struct SkillRow: View {
             .labelsHidden()
             .toggleStyle(.switch)
             .controlSize(.small)
+            .tint(AppearanceSettings.toggleTint)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

@@ -1,0 +1,36 @@
+// What's actually rendered on screen — distinct from Turn (types.ts), which
+// is what gets sent to the provider. A tool_call_requested/tool_result pair
+// collapses into ONE display row that starts pending and fills in a result.
+
+import type { EaonMode } from "../types.js";
+import type { Quote } from "./quotes.js";
+import type { SessionSummary } from "../session/store.js";
+
+export type DisplayMessage =
+  | {
+      id: string;
+      role: "banner";
+      version: string;
+      quote: Quote;
+      mode: EaonMode;
+      modelLabel: string;
+      projectRoot: string;
+      recentSessions: SessionSummary[];
+    }
+  | { id: string; role: "user"; text: string }
+  | { id: string; role: "assistant"; text: string; reasoning: string; streaming: boolean }
+  | { id: string; role: "system"; text: string; tone: "info" | "error" | "success" }
+  | {
+      id: string;
+      role: "tool";
+      name: string;
+      summary: string;
+      detail?: string;
+      args: Record<string, unknown>;
+      pending: boolean;
+      /** The agent-loop call id this row displays — results are matched
+       * back to their row by this, never by tool name (two same-named
+       * calls in one turn would otherwise collide). */
+      callId?: string;
+      result?: { isError: boolean; text: string };
+    };

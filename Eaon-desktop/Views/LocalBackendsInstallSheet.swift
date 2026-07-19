@@ -46,6 +46,7 @@ struct LocalBackendsInstallSheet: View {
                 HStack(spacing: 5) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11))
+                        .iconHoverEffect(for: "arrow.clockwise")
                     Text("Check Again")
                         .font(AppFont.mono(11, weight: .medium))
                 }
@@ -57,6 +58,7 @@ struct LocalBackendsInstallSheet: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(colors.textSecondary)
+                    .iconHoverEffect(for: "xmark")
                     .frame(width: 26, height: 26)
                     .background(Circle().fill(colors.backgroundSubtle))
             }

@@ -16,7 +16,18 @@ struct CustomProviderAPIService {
         modelId: String,
         history: [HistoryTurn],
         typewriter: TypewriterStreamController,
-        nativeTools: NativeToolConfig? = nil
+        nativeTools: NativeToolConfig? = nil,
+        /// Extra top-level request fields merged straight into the JSON
+        /// body — right now just the composer's Thinking toggle
+        /// (`["think": false]`), only ever sent for a local Ollama model
+        /// whose own `/api/tags` capabilities confirmed it supports the
+        /// field (see `LocalModelRecord.supportsThinkingToggle`). `nil`
+        /// (the common case) changes nothing about the request.
+        extraFields: [String: Any]? = nil,
+        /// The user's global model parameters (Settings → Model Parameters),
+        /// translated per-format below. Empty (the default) when the user
+        /// hasn't opted any parameter in — sends nothing extra.
+        sampling: SamplingParameters = SamplingParameters()
     ) async throws {
         guard let base = URL(string: config.baseURL), !config.baseURL.isEmpty else {
             throw APIClientError.unexpectedResponse("\"\(config.baseURL)\" isn't a valid base URL.")
@@ -24,17 +35,17 @@ struct CustomProviderAPIService {
 
         switch config.format {
         case .openAICompatible:
-            try await streamOpenAICompatible(base: base, apiKey: apiKey, modelId: modelId, history: history, typewriter: typewriter, nativeTools: nativeTools)
+            try await streamOpenAICompatible(base: base, apiKey: apiKey, modelId: modelId, history: history, typewriter: typewriter, nativeTools: nativeTools, extraFields: extraFields, sampling: sampling)
         case .anthropicMessages:
             // Native tools deliberately not attached: Anthropic's tool_use
             // wire shape is different, and the fenced-markup channel (still
             // taught in the system prompt) works there — one honest gap,
             // not a silent wrong-format request.
-            try await streamAnthropicMessages(base: base, apiKey: apiKey, modelId: modelId, history: history, typewriter: typewriter)
+            try await streamAnthropicMessages(base: base, apiKey: apiKey, modelId: modelId, history: history, typewriter: typewriter, sampling: sampling)
         case .googleGemini:
             // Same as Anthropic — Gemini's functionDeclarations shape is
             // its own; markup remains the channel there.
-            try await streamGoogleGemini(base: base, apiKey: apiKey, modelId: modelId, history: history, typewriter: typewriter)
+            try await streamGoogleGemini(base: base, apiKey: apiKey, modelId: modelId, history: history, typewriter: typewriter, sampling: sampling)
         }
     }
 
@@ -46,7 +57,9 @@ struct CustomProviderAPIService {
         modelId: String,
         history: [HistoryTurn],
         typewriter: TypewriterStreamController,
-        nativeTools: NativeToolConfig?
+        nativeTools: NativeToolConfig?,
+        extraFields: [String: Any]? = nil,
+        sampling: SamplingParameters = SamplingParameters()
     ) async throws {
         var request = URLRequest(url: base.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
@@ -56,8 +69,12 @@ struct CustomProviderAPIService {
 
         let apiMessages = history.map(\.openAICompatibleJSON)
         var body: [String: Any] = ["model": modelId, "messages": apiMessages, "stream": true]
+        for (key, value) in sampling.openAIFields() { body[key] = value }
         if let nativeTools {
             body["tools"] = nativeTools.tools
+        }
+        if let extraFields {
+            for (key, value) in extraFields { body[key] = value }
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -70,7 +87,14 @@ struct CustomProviderAPIService {
             // work there — retry once without tools; the fenced-markup
             // channel remains available to the model either way.
             if nativeTools != nil, (400...422).contains(http.statusCode), message.lowercased().contains("tool") {
-                try await streamOpenAICompatible(base: base, apiKey: apiKey, modelId: modelId, history: history, typewriter: typewriter, nativeTools: nil)
+                try await streamOpenAICompatible(base: base, apiKey: apiKey, modelId: modelId, history: history, typewriter: typewriter, nativeTools: nil, extraFields: extraFields, sampling: sampling)
+                return
+            }
+            // A model refusing a sampling parameter (reasoning models often
+            // reject `temperature`) shouldn't break chat for someone who
+            // moved a slider — retry once without the parameters.
+            if !sampling.isEmpty, (400...422).contains(http.statusCode), SamplingParameters.looksLikeRejection(message) {
+                try await streamOpenAICompatible(base: base, apiKey: apiKey, modelId: modelId, history: history, typewriter: typewriter, nativeTools: nativeTools, extraFields: extraFields, sampling: SamplingParameters())
                 return
             }
             throw APIClientError.httpError(status: http.statusCode, message: message)
@@ -121,7 +145,8 @@ struct CustomProviderAPIService {
         apiKey: String,
         modelId: String,
         history: [HistoryTurn],
-        typewriter: TypewriterStreamController
+        typewriter: TypewriterStreamController,
+        sampling: SamplingParameters = SamplingParameters()
     ) async throws {
         var request = URLRequest(url: base.appendingPathComponent("messages"))
         request.httpMethod = "POST"
@@ -148,14 +173,17 @@ struct CustomProviderAPIService {
 
         var body: [String: Any] = [
             "model": modelId,
-            "max_tokens": 4096,
+            // Anthropic requires max_tokens; honor the user's cap if set,
+            // else keep the prior default.
+            "max_tokens": sampling.maxTokens ?? 4096,
             "messages": turns,
             "stream": true,
         ]
+        for (key, value) in sampling.anthropicFields() { body[key] = value }
         if !systemText.isEmpty { body["system"] = systemText }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await AppHTTP.session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         if http.statusCode != 200 {
             throw APIClientError.httpError(status: http.statusCode, message: try await Self.readErrorBody(bytes))
@@ -189,7 +217,8 @@ struct CustomProviderAPIService {
         apiKey: String,
         modelId: String,
         history: [HistoryTurn],
-        typewriter: TypewriterStreamController
+        typewriter: TypewriterStreamController,
+        sampling: SamplingParameters = SamplingParameters()
     ) async throws {
         guard var components = URLComponents(
             url: base.appendingPathComponent("models/\(modelId):streamGenerateContent"),
@@ -233,9 +262,12 @@ struct CustomProviderAPIService {
             contents[0]["parts"] = parts
         }
 
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["contents": contents])
+        var geminiBody: [String: Any] = ["contents": contents]
+        let generationConfig = sampling.geminiGenerationConfig()
+        if !generationConfig.isEmpty { geminiBody["generationConfig"] = generationConfig }
+        request.httpBody = try JSONSerialization.data(withJSONObject: geminiBody)
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await AppHTTP.session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         if http.statusCode != 200 {
             throw APIClientError.httpError(status: http.statusCode, message: try await Self.readErrorBody(bytes))
@@ -328,7 +360,7 @@ struct CustomProviderAPIService {
     }
 
     private static func getJSON(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await AppHTTP.session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard http.statusCode == 200 else {
             throw APIClientError.httpError(status: http.statusCode, message: Self.readErrorBody(data))

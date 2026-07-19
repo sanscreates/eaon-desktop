@@ -50,7 +50,7 @@ struct ChatComposer: View {
     var body: some View {
         VStack(spacing: 8) {
             if viewModel.chatModels.isEmpty {
-                noticeBanner(icon: "key.fill", tint: .orange, text: "Set up a model provider in Settings to start chatting — Aqua, your own API key, or a local model.")
+                noticeBanner(icon: "key.fill", tint: .orange, text: "Set up a model provider in Settings to start chatting — Eaon, your own API key, or a local model.")
             }
             if let notice = viewModel.composerNotice {
                 noticeBanner(icon: "info.circle", tint: .orange, text: notice)
@@ -180,6 +180,7 @@ struct ChatComposer: View {
             Image(systemName: "plus")
                 .font(.system(size: 17, weight: .regular))
                 .foregroundStyle(colors.textPrimary.opacity(0.85))
+                .iconHoverEffect(for: "plus")
                 .frame(width: 34, height: 34)
                 .background(Circle().fill(colors.backgroundInputSecondary))
                 .contentShape(Circle())
@@ -193,6 +194,27 @@ struct ChatComposer: View {
                 onComingSoon: { feature in
                     isAttachMenuOpen = false
                     viewModel.composerNotice = "\(feature) is coming to Eaon soon."
+                },
+                onInsertTemplate: { template in
+                    isAttachMenuOpen = false
+                    // Replaces rather than appends: this is meant as a
+                    // starting point to fill in, not something to bolt onto
+                    // whatever was already typed. A non-empty composer is
+                    // the rare case (the "+" menu is usually the first
+                    // thing tapped), and overwriting it silently would lose
+                    // real typing, so ask first rather than guess.
+                    if !viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        viewModel.composerNotice = "Clear the composer first to insert a template."
+                        return
+                    }
+                    viewModel.inputText = template
+                    AppFocus.activate()
+                    isFocused = true
+                },
+                isThinkingAvailable: viewModel.currentModelSupportsThinkingToggle,
+                thinkingEnabled: viewModel.thinkingEnabled,
+                onToggleThinking: {
+                    viewModel.thinkingEnabled.toggle()
                 }
             )
         }
@@ -215,10 +237,15 @@ struct ChatComposer: View {
             Image(systemName: "stop.fill")
                 .font(.system(size: 13))
                 .foregroundStyle(.white)
+                .iconHoverEffect(for: "stop.fill")
         } else {
+            // Nudges up-and-out on hover, like a paper airplane taking
+            // off — the one motion that matches "send" without adding
+            // showy movement to the single most-clicked button in the app.
             Image(systemName: "arrow.up")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(colors.backgroundPrimary)
+                .iconHoverEffect(for: "arrow.up")
         }
     }
 
@@ -290,6 +317,7 @@ private struct SkillAutocompletePopover: View {
                         Image(systemName: "bolt.fill")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(colors.textTertiary)
+                            .iconHoverEffect(for: "bolt.fill")
                             .frame(width: 18)
                         VStack(alignment: .leading, spacing: 1) {
                             Text("/\(skill.name)")
@@ -337,6 +365,7 @@ private struct AgentPermissionPill: View {
             HStack(spacing: 5) {
                 Image(systemName: icon)
                     .font(.system(size: 10, weight: .semibold))
+                    .iconHoverEffect(for: icon)
                 Text(label)
                     .font(AppFont.mono(11, weight: .medium))
             }
@@ -469,6 +498,15 @@ private struct EnterToSendTextEditor: NSViewRepresentable {
         textView.backgroundColor = .clear
         textView.font = AppFont.sansNSFont(16)
         textView.textContainerInset = NSSize(width: 4, height: 4)
+        // NSTextView adds a default 5pt lineFragmentPadding inside the text
+        // container, so typed text (and the blinking caret) sit ~5pt to the
+        // right of where the placeholder Text is drawn — the caret ends up
+        // landing on top of the placeholder's first glyphs ("Ask …") instead
+        // of just before them. Zeroing it makes the caret/first-character
+        // origin (padding 2 + inset 4 = 6) line up exactly with the
+        // placeholder's own leading padding (6), so the caret sits cleanly at
+        // the start of the field. See GrowingMessageField's ZStack layout.
+        textView.textContainer?.lineFragmentPadding = 0
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]

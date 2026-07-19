@@ -57,12 +57,22 @@ Tanzim
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how
-to get set up and what to expect from a PR.
+**Contributions are genuinely welcome and made as easy as possible.** No
+account, no CLA to sign, no external dependencies to wrangle:
+
+```sh
+git clone https://github.com/sanscreates/eaon-desktop
+cd eaon-desktop
+swift build && ./run.sh
+```
+
+That's the whole setup. Open an issue, pick up a
+[`good first issue`](https://github.com/sanscreates/eaon-desktop/labels/good%20first%20issue),
+or just send a PR — see [CONTRIBUTING.md](CONTRIBUTING.md) for the (short)
+details and the one-line sign-off we use instead of a contributor agreement.
 
 ## License
 
-[GNU GPL v3.0](LICENSE.md) — you're free to use, study, modify, and
-redistribute this software. Any modified version you distribute must also
-be licensed under the GPL, with its source made available. See
-[LICENSE.md](LICENSE.md) for the exact terms.
+Eaon is [GNU GPL v3.0](LICENSE.md). You're free to use, study, modify, and
+redistribute it. Any modified version you distribute must also be GPLv3,
+with source available, keeping the existing copyright notices. Fork away.

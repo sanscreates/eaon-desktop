@@ -91,7 +91,7 @@ enum ProviderBrand: String, Hashable, Codable, CaseIterable {
         case .stepFun: return "StepFun"
         case .nous: return "Nous Research"
         case .amazon: return "Amazon"
-        case .aqua: return "Aqua"
+        case .aqua: return "Eaon"
         case .inceptionLabs: return "Inception Labs"
         case .cohere: return "Cohere"
         case .ai21: return "AI21 Labs"

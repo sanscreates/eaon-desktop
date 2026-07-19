@@ -21,6 +21,14 @@ struct LocalProviderSettingsView: View {
 
     private var isInstalled: Bool { manager.installed.contains(backend) }
 
+    /// "7.1 GB" / "512 MB" — decimal units matching Ollama's own reporting
+    /// (and the row badge has no room for more words).
+    static func formatResidentBytes(_ bytes: Int64) -> String {
+        let gigabytes = Double(bytes) / 1_000_000_000
+        if gigabytes >= 1 { return String(format: "%.1f GB", gigabytes) }
+        return String(format: "%.0f MB", gigabytes * 1000)
+    }
+
     private var backendModels: [LocalModelRecord] {
         switch backend {
         case .ollama: return manager.ollamaModels
@@ -84,7 +92,10 @@ struct LocalProviderSettingsView: View {
         .onAppear {
             manager.detectInstalledBackends()
             if backend == .ollama {
-                Task { await manager.refreshOllamaModels() }
+                Task {
+                    await manager.refreshOllamaModels()
+                    await manager.refreshLoadedOllamaModels()
+                }
             }
         }
         .alert(
@@ -253,11 +264,15 @@ struct LocalProviderSettingsView: View {
                         .foregroundColor(colors.textPrimary)
                     Spacer()
                     Button {
-                        Task { await manager.refreshOllamaModels(startServerIfNeeded: true) }
+                        Task {
+                            await manager.refreshOllamaModels(startServerIfNeeded: true)
+                            await manager.refreshLoadedOllamaModels()
+                        }
                     } label: {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(colors.textSecondary)
+                            .iconHoverEffect(for: "arrow.clockwise")
                             .frame(width: 28, height: 28)
                             .background(colors.backgroundInput)
                             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -330,6 +345,7 @@ struct LocalProviderSettingsView: View {
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(colors.textTertiary)
+                            .iconHoverEffect(for: "chevron.up.chevron.down")
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
@@ -424,6 +440,7 @@ struct LocalProviderSettingsView: View {
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "folder")
+                                .iconHoverEffect(for: "folder")
                             Text("Choose a .gguf file on this Mac…")
                         }
                         .font(AppFont.mono(12, weight: .medium))
@@ -479,6 +496,31 @@ struct LocalProviderSettingsView: View {
 
             Spacer()
 
+            // Ollama: per-model residency is real, queryable state
+            // (`/api/ps`) — show the live footprint and an eject that
+            // frees it now instead of waiting out the keep-alive timer.
+            if record.backend == .ollama, let residentBytes = manager.loadedOllamaModels[record.requestModelId] {
+                Text("IN MEMORY · \(Self.formatResidentBytes(residentBytes))")
+                    .font(AppFont.mono(9, weight: .bold))
+                    .foregroundStyle(colors.textSecondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(colors.backgroundSubtle)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+                Button {
+                    Task { await manager.unloadOllamaModel(record.requestModelId) }
+                } label: {
+                    Image(systemName: "eject")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "eject")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("Unload from memory — frees the RAM now; the next message loads it again")
+            }
+
             if manager.activeSpawned?.modelId == record.id {
                 Text("RUNNING")
                     .font(AppFont.mono(9, weight: .bold))
@@ -487,10 +529,25 @@ struct LocalProviderSettingsView: View {
                     .padding(.vertical, 3)
                     .background(colors.backgroundSubtle)
                     .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+                // llama.cpp/MLX residency IS the spawned server process —
+                // eject = stop it, same as the status card's own "Stop
+                // server," just reachable from the model's own row.
+                Button {
+                    manager.stopSpawnedServer()
+                } label: {
+                    Image(systemName: "eject")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(colors.textSecondary)
+                        .iconHoverEffect(for: "eject")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("Stop the server and unload from memory")
             }
 
             if record.backend == .llamaCpp {
-                GPUModeMenu(manager: manager, record: record)
+                LlamaRunSettingsMenu(manager: manager, record: record)
             }
 
             Button {
@@ -499,6 +556,7 @@ struct LocalProviderSettingsView: View {
                 Image(systemName: "trash")
                     .font(.system(size: 13))
                     .foregroundColor(colors.textSecondary)
+                    .iconHoverEffect(for: "trash")
                     .frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
