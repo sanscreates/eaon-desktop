@@ -3,6 +3,27 @@
 All notable changes to Eaon are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/) — newest release on top.
 
+## [2026.3.2] — 2026-07-19
+
+### Added
+- Free Week — 7 days of every hosted model, free, one click, no
+  account, no card. Bound to this Mac (hardware fingerprint), so
+  reinstalling the app recovers your existing trial instead of
+  starting a new one. Start it from onboarding, Settings → Providers,
+  or the new one-time popup nudge for installs that already dismissed
+  onboarding before this existed.
+- Settings → General → Gifts — a stable place to see and redeem what's
+  currently available, showing the live claimed/remaining count and
+  redemption deadline for the Free Week.
+- Eaon CLI now tells you when the copy installed by a previous version
+  of the app is out of date — a badge and Update button in the CLI
+  hub, plus a status line in General. Updating re-copies the newer
+  bundled build without touching your CLI config or sessions.
+
+### Changed
+- The bundled Eaon CLI now checks Eaon Desktop's own copy on launch
+  and prints a one-line heads-up in the terminal when it's behind.
+
 ## [2026.3.1] — 2026-07-19
 
 ### Added
