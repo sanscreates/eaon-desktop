@@ -1,6 +1,6 @@
 import Foundation
 
-enum AquaAPI {
+enum EaonHostedAPI {
     static let baseURL = URL(string: "https://api.aquadevs.com/v1")!
 
     static var modelsURL: URL {
@@ -12,7 +12,7 @@ enum AquaAPI {
     }
 }
 
-struct AquaAPIService {
+struct EaonHostedAPIService {
     func fetchModels() async throws -> [APIModel] {
         // During a free-week trial (no user key), the list comes from Eaon's
         // gateway — signed, and already server-filtered to the models the
@@ -23,7 +23,7 @@ struct AquaAPIService {
             request = URLRequest(url: access.modelsURL)
             EaonAccess.authorize(&request, apiKey: access.apiKey)
         } else {
-            request = URLRequest(url: AquaAPI.modelsURL)
+            request = URLRequest(url: EaonHostedAPI.modelsURL)
         }
         request.timeoutInterval = 30
         // Same gateway that flaps 502 on chat completions serves this list —
@@ -32,24 +32,24 @@ struct AquaAPIService {
         let (data, response) = try await TransientHTTPRetry.sendData(request)
 
         guard response.statusCode == 200 else {
-            throw AquaAPIError.badResponse
+            throw EaonHostedAPIError.badResponse
         }
 
         let decoded = try JSONDecoder().decode(APIModelResponse.self, from: data)
-        return AquaSupportedModels.filterSupported(decoded.data)
+        return EaonHostedModels.filterSupported(decoded.data)
             .sorted { lhs, rhs in
                 lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
             }
     }
 }
 
-enum AquaAPIError: LocalizedError {
+enum EaonHostedAPIError: LocalizedError {
     case badResponse
 
     var errorDescription: String? {
         switch self {
         case .badResponse:
-            return "Could not load models from the Aqua API."
+            return "Could not load models from Eaon's hosted API."
         }
     }
 }

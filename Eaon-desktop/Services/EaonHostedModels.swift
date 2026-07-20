@@ -1,7 +1,7 @@
 import Foundation
 
-enum AquaSupportedModels {
-    /// Chat models supported by Aqua's hosted API (see `AquaAPI.baseURL`),
+enum EaonHostedModels {
+    /// Chat models supported by Aqua's hosted API (see `EaonHostedAPI.baseURL`),
     /// kept in sync with what the live `/v1/models` endpoint actually returns.
     /// Non-chat entries from the API (image, audio, etc.) are excluded.
     private static let catalog: [String: String] = [

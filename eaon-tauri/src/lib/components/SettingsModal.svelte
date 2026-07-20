@@ -3,7 +3,7 @@
   // (clamped to the window with a 24px margin, the same responsive fix the
   // Mac app just got), 230px category sidebar with BETA pills and the
   // MODEL PROVIDERS section, content pane per page.
-  import { app, ACCENT_OPTIONS, AQUA_BASE_URL } from "$lib/state.svelte";
+  import { app, ACCENT_OPTIONS, EAON_HOSTED_BASE_URL } from "$lib/state.svelte";
   import type { CustomProvider, FontSizeChoice, ImageProvider, ImageWireFormat, McpServer, Skill, ThemeChoice } from "$lib/types";
   import { MCP_PRESETS } from "$lib/mcp";
   import { formatBytes, modKeyLabel, uid } from "$lib/utils";

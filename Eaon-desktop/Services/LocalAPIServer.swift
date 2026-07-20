@@ -100,7 +100,7 @@ private enum LocalAPIRouting {
         }
         let aquaConfig = CustomProviderConfig(
             brand: .aqua,
-            baseURL: AquaAPI.baseURL.absoluteString,
+            baseURL: EaonHostedAPI.baseURL.absoluteString,
             format: .openAICompatible,
             modelIDs: [modelId]
         )
@@ -289,7 +289,7 @@ final class LocalAPIServer {
     // MARK: - GET /v1/models
 
     private func handleModelsList(on connection: NWConnection) async {
-        let aquaModels = (try? await AquaAPIService().fetchModels()) ?? []
+        let aquaModels = (try? await EaonHostedAPIService().fetchModels()) ?? []
         let candidates = aquaModels.filter(\.isChatModel) + CustomProviderStore.shared.syntheticModels + LocalAIManager.shared.syntheticModels
 
         var seen = Set<String>()

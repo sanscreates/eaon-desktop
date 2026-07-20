@@ -185,7 +185,7 @@ struct NetworkSettingsView: View {
         isTesting = true
         testResult = nil
         applyPort()
-        var request = URLRequest(url: AquaAPI.modelsURL)
+        var request = URLRequest(url: EaonHostedAPI.modelsURL)
         request.timeoutInterval = 12
         request.httpMethod = "GET"
         do {

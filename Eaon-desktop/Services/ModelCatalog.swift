@@ -412,7 +412,7 @@ enum ModelCatalog {
     }
 
     static func displayName(modelId: String, apiName: String?) -> String {
-        AquaSupportedModels.displayName(for: modelId, apiName: apiName)
+        EaonHostedModels.displayName(for: modelId, apiName: apiName)
     }
 
     static func subtitle(modelId: String, apiName: String?, tier: String?) -> String {

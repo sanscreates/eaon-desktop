@@ -160,7 +160,7 @@ class ChatViewModel {
     var isAskingToEnterAutoMode: Bool = false
     var availableModels: [APIModel] = []
     /// Eaon's hosted image-generation models — fetched separately from
-    /// `availableModels` because `AquaSupportedModels` (behind
+    /// `availableModels` because `EaonHostedModels` (behind
     /// `apiService.fetchModels()`) is a hand-maintained chat-only allowlist
     /// that excludes them entirely; this reads the live `type == "image"`
     /// field directly instead. See `AquaImageModels`.
@@ -700,7 +700,7 @@ class ChatViewModel {
         WorkspaceRunner.shared.note("preview error: \(trimmed)\n", kind: .stderr)
     }
 
-    private let apiService = AquaAPIService()
+    private let apiService = EaonHostedAPIService()
     private static let selectedModelKey = "selected_model_id"
     private static let customInstructionsKey = "custom_instructions"
     private static let currentModeKey = "eaon_current_mode"

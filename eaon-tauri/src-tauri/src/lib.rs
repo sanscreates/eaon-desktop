@@ -99,7 +99,7 @@ struct ChatMessagePayload {
 #[serde(rename_all = "camelCase")]
 struct ChatRequest {
     /// OpenAI-compatible base, e.g. `http://127.0.0.1:11434/v1` for local
-    /// Ollama or `https://api.aquadevs.com/v1`. `/chat/completions` appended.
+    /// Ollama or a hosted provider's own `/v1` root. `/chat/completions` appended.
     base_url: String,
     api_key: Option<String>,
     model: String,

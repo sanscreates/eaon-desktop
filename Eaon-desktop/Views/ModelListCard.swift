@@ -227,6 +227,6 @@ struct ModelListCard: View {
     }
 
     private func defaultCatalogName(for model: APIModel) -> String {
-        AquaSupportedModels.defaultDisplayName(for: model.id, apiName: model.name)
+        EaonHostedModels.defaultDisplayName(for: model.id, apiName: model.name)
     }
 }

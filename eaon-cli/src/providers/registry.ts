@@ -5,7 +5,7 @@
 
 import type { CustomProviderFormat, EaonConfig, ModelEntry } from "../types.js";
 import { resolveAquaApiKey, resolveOllamaBaseUrl } from "../config.js";
-import { AQUA_BASE_URL, AQUA_CATALOG, fetchAquaModels } from "./aqua.js";
+import { EAON_HOSTED_BASE_URL, EAON_HOSTED_CATALOG, fetchEaonHostedModels } from "./eaon-hosted.js";
 import { fetchOllamaTags } from "./ollama.js";
 
 export interface CatalogResult {
@@ -21,7 +21,7 @@ export async function buildCatalog(config: EaonConfig): Promise<CatalogResult> {
   const aquaKey = resolveAquaApiKey(config);
   if (aquaKey) {
     try {
-      const aquaModels = await fetchAquaModels(aquaKey);
+      const aquaModels = await fetchEaonHostedModels(aquaKey);
       for (const m of aquaModels) {
         models.push({ key: `aqua:${m.id}`, requestId: m.id, display: m.name, provider: { kind: "aqua" }, tier: m.tier, supportsTools: true });
       }
@@ -64,7 +64,7 @@ export function endpointFor(entry: ModelEntry, config: EaonConfig): { baseUrl: s
   const provider = entry.provider;
   switch (provider.kind) {
     case "aqua":
-      return { baseUrl: AQUA_BASE_URL, apiKey: resolveAquaApiKey(config), format: "openAICompatible" };
+      return { baseUrl: EAON_HOSTED_BASE_URL, apiKey: resolveAquaApiKey(config), format: "openAICompatible" };
     case "ollama":
       return { baseUrl: `${resolveOllamaBaseUrl(config)}/v1`, apiKey: null, format: "openAICompatible" };
     case "custom": {
@@ -77,7 +77,7 @@ export function endpointFor(entry: ModelEntry, config: EaonConfig): { baseUrl: s
 /** A display label naming both the model and where it runs. */
 export function describeEntry(entry: ModelEntry): string {
   switch (entry.provider.kind) {
-    case "aqua": return `${entry.display} · Aqua`;
+    case "aqua": return `${entry.display} · Eaon`;
     case "ollama": return `${entry.display} · Local (Ollama)`;
     case "custom": return `${entry.display}`;
   }
@@ -87,4 +87,4 @@ export function findModel(models: ModelEntry[], key: string): ModelEntry | undef
   return models.find((m) => m.key === key || m.requestId === key || m.display === key);
 }
 
-export { AQUA_CATALOG };
+export { EAON_HOSTED_CATALOG };

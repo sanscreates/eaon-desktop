@@ -48,11 +48,11 @@ import {
   parseExtraction,
 } from "./memory";
 
-export const AQUA_BASE_URL = "https://api.aquadevs.com/v1";
+export const EAON_HOSTED_BASE_URL = "https://api.aquadevs.com/v1";
 export const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
 
 /** Aqua's hand-maintained chat allowlist — port of AquaSupportedModels. */
-export const AQUA_CATALOG: Record<string, string> = {
+export const EAON_HOSTED_CATALOG: Record<string, string> = {
   "agnes": "Agnes 2.0 Flash", "deepseek-v3": "DeepSeek V3", "deepseek-v3.1": "DeepSeek V3.1 Terminus",
   "deepseek-v3.2": "DeepSeek V3.2", "deepseek-v4": "DeepSeek V4 Flash", "deepseek-v4-pro": "DeepSeek V4 Pro",
   "diffusion-gemma": "Diffusion Gemma 26B", "fable-5": "Claude Fable 5", "gemini-3": "Gemini 3.0 Flash",
@@ -279,7 +279,7 @@ class AppState {
         entries.push({
           key: `aqua:${m.id}`,
           requestId: m.id,
-          display: this.settings.nicknames[`aqua:${m.id}`] ?? m.name ?? AQUA_CATALOG[m.id] ?? m.id,
+          display: this.settings.nicknames[`aqua:${m.id}`] ?? m.name ?? EAON_HOSTED_CATALOG[m.id] ?? m.id,
           provider: { kind: "aqua" },
           tier: m.tier,
         });
@@ -605,10 +605,10 @@ class AppState {
     }
     if (this.settings.aquaApiKey) {
       try {
-        const models = await api.fetchProviderModels(AQUA_BASE_URL, this.settings.aquaApiKey);
+        const models = await api.fetchProviderModels(EAON_HOSTED_BASE_URL, this.settings.aquaApiKey);
         this.aquaModels = models
-          .filter((m) => (m.modelType ?? "text").toLowerCase() === "text" && AQUA_CATALOG[m.id])
-          .map((m) => ({ id: m.id, name: m.name ?? AQUA_CATALOG[m.id] ?? null, tier: m.tier ?? null }))
+          .filter((m) => (m.modelType ?? "text").toLowerCase() === "text" && EAON_HOSTED_CATALOG[m.id])
+          .map((m) => ({ id: m.id, name: m.name ?? EAON_HOSTED_CATALOG[m.id] ?? null, tier: m.tier ?? null }))
           .sort((a, b) => a.id.localeCompare(b.id));
         // Image models come from the live `type` field, not the chat
         // allowlist — a new image model Aqua adds shows up automatically
@@ -925,7 +925,7 @@ class AppState {
     } else if (this.aquaImageModels.length && this.settings.aquaApiKey) {
       result = await api.generateImage({
         format: "aqua",
-        baseUrl: AQUA_BASE_URL,
+        baseUrl: EAON_HOSTED_BASE_URL,
         model: this.aquaImageModels[0],
         prompt,
         apiKey: this.settings.aquaApiKey,
@@ -999,7 +999,7 @@ class AppState {
   private endpointFor(model: ModelEntry): { baseUrl: string; apiKey: string | null } {
     switch (model.provider.kind) {
       case "aqua":
-        return { baseUrl: AQUA_BASE_URL, apiKey: this.settings.aquaApiKey };
+        return { baseUrl: EAON_HOSTED_BASE_URL, apiKey: this.settings.aquaApiKey };
       case "ollama":
         return { baseUrl: `${this.settings.ollamaBaseUrl}/v1`, apiKey: null };
       case "custom": {

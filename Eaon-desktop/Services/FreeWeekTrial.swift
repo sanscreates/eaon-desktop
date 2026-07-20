@@ -342,7 +342,7 @@ struct EaonAccess {
     /// lock-box, not MainActor state) so streaming paths resolve freely.
     static var current: EaonAccess? {
         if let key = APIKeyStore.loadAPIKey(), !key.isEmpty {
-            return EaonAccess(baseURL: AquaAPI.baseURL, apiKey: key, isTrial: false)
+            return EaonAccess(baseURL: EaonHostedAPI.baseURL, apiKey: key, isTrial: false)
         }
         if let credential = TrialCredentialBox.current, credential.expiresAt > Date() {
             return EaonAccess(baseURL: FreeWeekTrial.baseURL, apiKey: credential.key, isTrial: true)
@@ -371,7 +371,7 @@ struct EaonAccess {
     /// The base URL requests carrying `apiKey` should target — the
     /// GenerationRouting counterpart of `authorize`.
     static func baseURL(forKey apiKey: String) -> URL {
-        FreeWeekTrial.isTrialKey(apiKey) ? FreeWeekTrial.baseURL : AquaAPI.baseURL
+        FreeWeekTrial.isTrialKey(apiKey) ? FreeWeekTrial.baseURL : EaonHostedAPI.baseURL
     }
 }
 

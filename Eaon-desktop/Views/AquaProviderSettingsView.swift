@@ -104,7 +104,7 @@ struct AquaProviderSettingsView: View {
                     Text("Eaon API")
                         .font(AppFont.mono(14, weight: .semibold))
                         .foregroundColor(colors.textPrimary)
-                    Text(AquaAPI.baseURL.absoluteString)
+                    Text("Hosted models via your Eaon API key")
                         .font(AppFont.mono(12))
                         .foregroundColor(colors.textSecondary)
                 }
@@ -321,7 +321,7 @@ struct AquaProviderSettingsView: View {
                     HStack(spacing: 10) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("Loading models from \(AquaAPI.baseURL.host ?? "API")…")
+                        Text("Loading models…")
                             .font(AppFont.mono(13))
                             .foregroundColor(colors.textSecondary)
                     }
@@ -442,7 +442,7 @@ struct AquaProviderSettingsView: View {
     }
 
     private func defaultCatalogName(for model: APIModel) -> String {
-        AquaSupportedModels.defaultDisplayName(for: model.id, apiName: model.name)
+        EaonHostedModels.defaultDisplayName(for: model.id, apiName: model.name)
     }
 
     private func saveAPIKey() {

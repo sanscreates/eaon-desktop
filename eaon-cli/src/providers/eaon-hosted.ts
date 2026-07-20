@@ -1,11 +1,11 @@
-// Aqua-hosted models — same base URL and hand-maintained allowlist as the
-// Mac app (AquaSupportedModels) and the Tauri core (AQUA_CATALOG in
+// Eaon's hosted models — same base URL and hand-maintained allowlist as the
+// Mac app (EaonHostedModels) and the Tauri core (EAON_HOSTED_CATALOG in
 // state.svelte.ts), copied verbatim so a model id means the same thing on
 // every Eaon surface.
 
-export const AQUA_BASE_URL = "https://api.aquadevs.com/v1";
+export const EAON_HOSTED_BASE_URL = "https://api.aquadevs.com/v1";
 
-export const AQUA_CATALOG: Record<string, string> = {
+export const EAON_HOSTED_CATALOG: Record<string, string> = {
   "agnes": "Agnes 2.0 Flash", "deepseek-v3": "DeepSeek V3", "deepseek-v3.1": "DeepSeek V3.1 Terminus",
   "deepseek-v3.2": "DeepSeek V3.2", "deepseek-v4": "DeepSeek V4 Flash", "deepseek-v4-pro": "DeepSeek V4 Pro",
   "diffusion-gemma": "Diffusion Gemma 26B", "fable-5": "Claude Fable 5", "gemini-3": "Gemini 3.0 Flash",
@@ -22,26 +22,26 @@ export const AQUA_CATALOG: Record<string, string> = {
   "sonnet-4.6": "Claude Sonnet 4.6", "sonnet-5": "Claude Sonnet 5", "step-3.7": "Step 3.7 Flash",
 };
 
-export interface AquaModel {
+export interface EaonHostedModel {
   id: string;
   name: string;
   tier: string | null;
 }
 
 /** GET {base}/models (OpenAI-compatible {data:[{id,name,type,tier}]}),
- * filtered to text models that are on Aqua's own allowlist — the same
- * filter the Tauri core applies (state.svelte.ts refreshAquaModels). */
-export async function fetchAquaModels(apiKey: string): Promise<AquaModel[]> {
+ * filtered to text models that are on Eaon's own hosted allowlist — the
+ * same filter the Tauri core applies (state.svelte.ts refreshAquaModels). */
+export async function fetchEaonHostedModels(apiKey: string): Promise<EaonHostedModel[]> {
   if (!apiKey) return [];
-  const response = await fetch(`${AQUA_BASE_URL}/models`, {
+  const response = await fetch(`${EAON_HOSTED_BASE_URL}/models`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
   if (!response.ok) {
-    throw new Error(`Aqua returned ${response.status}`);
+    throw new Error(`Eaon's hosted API returned ${response.status}`);
   }
   const json = (await response.json()) as { data?: Array<{ id: string; name?: string | null; type?: string | null; tier?: string | null }> };
   const entries = json.data ?? [];
   return entries
-    .filter((m) => (m.type ?? "text").toLowerCase() === "text" && AQUA_CATALOG[m.id])
-    .map((m) => ({ id: m.id, name: m.name ?? AQUA_CATALOG[m.id] ?? m.id, tier: m.tier ?? null }));
+    .filter((m) => (m.type ?? "text").toLowerCase() === "text" && EAON_HOSTED_CATALOG[m.id])
+    .map((m) => ({ id: m.id, name: m.name ?? EAON_HOSTED_CATALOG[m.id] ?? m.id, tier: m.tier ?? null }));
 }

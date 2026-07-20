@@ -34,13 +34,13 @@ private func timestampedFileName(prefix: String) -> String {
 // MARK: - Aqua's hosted image models
 
 /// Aqua's hosted image-generation models — same account, same API key as
-/// chat, zero extra setup. `AquaSupportedModels` is a hand-maintained
+/// chat, zero extra setup. `EaonHostedModels` is a hand-maintained
 /// chat-only allowlist that silently excludes every non-text model; this
 /// reads the live `type` field instead, so a new image model Aqua adds
 /// later shows up automatically rather than needing another code change.
 enum AquaImageModels {
     static func fetchAvailable() async -> [APIModel] {
-        guard let (data, response) = try? await AppHTTP.session.data(from: AquaAPI.modelsURL),
+        guard let (data, response) = try? await AppHTTP.session.data(from: EaonHostedAPI.modelsURL),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let decoded = try? JSONDecoder().decode(APIModelResponse.self, from: data) else { return [] }
         return decoded.data.filter { ($0.type ?? "").lowercased() == "image" }
@@ -52,7 +52,7 @@ enum AquaImageModels {
     /// being OpenAI-compatible. A real call against `nanobanana` returned a
     /// genuine, fetchable 1024×1024 PNG.
     static func generate(model: String, prompt: String, apiKey: String) async throws -> GeneratedImageResult {
-        var request = URLRequest(url: AquaAPI.baseURL.appendingPathComponent("images/generations"))
+        var request = URLRequest(url: EaonHostedAPI.baseURL.appendingPathComponent("images/generations"))
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
