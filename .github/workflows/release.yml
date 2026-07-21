@@ -153,6 +153,10 @@ jobs:
             exit 0
           fi
 
+          # Resolve to absolute paths before pushd into tmpdir
+          APPIMAGE=$(realpath "$APPIMAGE")
+          BUNDLE_DIR=$(dirname "$APPIMAGE")
+
           echo "Fixing AppImage: $APPIMAGE"
           chmod +x "$APPIMAGE"
 
@@ -185,7 +189,7 @@ jobs:
           chmod +x appimagetool
 
           # Repack — use the original filename in the bundle dir
-          REPACKED="$BUNDLE_DIR/$(basename "$APPIMAGE")"
+          REPACKED="${BUNDLE_DIR}/$(basename "$APPIMAGE")"
           rm -f "$REPACKED" "$REPACKED.sig"
           ARCH="$ARCH" ./appimagetool --no-appstream squashfs-root "$REPACKED"
           echo "Repacked: $REPACKED ($(du -h "$REPACKED" | cut -f1))"
