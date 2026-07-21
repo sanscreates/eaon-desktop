@@ -145,7 +145,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          BUNDLE_DIR="eaon-tauri/src-tauri/target/release/bundle/appimage"
+          BUNDLE_DIR="${GITHUB_WORKSPACE:-$(pwd)}/eaon-tauri/src-tauri/target/release/bundle/appimage"
           APPIMAGE=$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.AppImage' -type f -print -quit 2>/dev/null || true)
 
           if [ -z "$APPIMAGE" ]; then
@@ -153,7 +153,6 @@ jobs:
             exit 0
           fi
 
-          # Resolve to absolute paths before pushd into tmpdir
           APPIMAGE=$(realpath "$APPIMAGE")
           BUNDLE_DIR=$(dirname "$APPIMAGE")
 
