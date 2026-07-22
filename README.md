@@ -52,8 +52,9 @@ To produce a distributable universal build (arm64 + x86_64), see
 ## Contributers
 
 Sanscreates,
-Mincoffical, and
-Tanzim
+Mincoffical,
+Tanzim, and 
+YoannDev90
 
 ## Contributing
 
