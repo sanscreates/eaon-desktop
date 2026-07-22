@@ -48,7 +48,11 @@ swift build
 
 To produce a distributable universal build (arm64 + x86_64), see
 `build-installer.sh` and `RELEASING-UPDATES.md`.
+## Supporters
 
+CanadianJet
+and 
+gyro
 ## Contributers
 
 Sanscreates,
