@@ -125,6 +125,97 @@ jobs:
         with:
           projectPath: eaon-tauri
 
+      # ---- Fix AppImage: strip bundled libglvnd + wayland ----
+      #
+      # Tauri's AppImage bundler (linuxdeploy-plugin-gtk) copies Ubuntu-compiled
+      # libglvnd (libGL/libEGL/libGLX/libGLdispatch) and libwayland-client/
+      # libwayland-egl into the squashfs. On non-Ubuntu distros (Fedora, Arch,
+      # NixOS, …) these conflict with the host's Mesa EGL stack, causing:
+      #   "Could not create default EGL display: EGL_BAD_PARAMETER. Aborting..."
+      #
+      # These libs are part of every desktop Linux since 2017. Dropping them
+      # lets the host provide a self-consistent graphics stack.
+      # https://github.com/tauri-apps/tauri/issues/11994
+      - name: Fix AppImage (strip libglvnd + wayland)
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          BUNDLE_DIR="${GITHUB_WORKSPACE:-$(pwd)}/eaon-tauri/src-tauri/target/release/bundle/appimage"
+          APPIMAGE=$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.AppImage' -type f -print -quit 2>/dev/null || true)
+
+          if [ -z "$APPIMAGE" ]; then
+            echo "::warning::No AppImage found in $BUNDLE_DIR — skipping libglvnd strip"
+            exit 0
+          fi
+
+          APPIMAGE=$(realpath "$APPIMAGE")
+          BUNDLE_DIR=$(dirname "$APPIMAGE")
+
+          echo "Fixing AppImage: $APPIMAGE"
+          chmod +x "$APPIMAGE"
+
+          WORKDIR=$(mktemp -d)
+          pushd "$WORKDIR" >/dev/null
+
+          # Extract the squashfs
+          "$APPIMAGE" --appimage-extract >/dev/null
+
+          # Drop the libglvnd halves + Mesa GBM + libwayland-egl/client/server.
+          # These are standard on every desktop Linux distro; bundling them
+          # caused the loader/dispatch ABI mismatch that aborts the WebKit GPU
+          # process with EGL_BAD_PARAMETER on non-Ubuntu distros.
+          DELETED=$(find squashfs-root \( -type f -o -type l \) \( \
+              -name 'libGL.so*' -o \
+              -name 'libEGL.so*' -o \
+              -name 'libGLX.so*' -o \
+              -name 'libGLdispatch.so*' -o \
+              -name 'libgbm.so*' -o \
+              -name 'libwayland-egl.so*' -o \
+              -name 'libwayland-client.so*' -o \
+              -name 'libwayland-server.so*' \
+              \) -print -delete 2>/dev/null | wc -l)
+          echo "Removed $DELETED conflicting libraries from AppImage"
+
+          # Download appimagetool (static, no deps)
+          ARCH=$(uname -m)
+          curl -fsSL --retry 3 -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
+          chmod +x appimagetool
+
+          # Repack — use the original filename in the bundle dir
+          REPACKED="${BUNDLE_DIR}/$(basename "$APPIMAGE")"
+          rm -f "$REPACKED" "$REPACKED.sig"
+          ARCH="$ARCH" ./appimagetool --no-appstream squashfs-root "$REPACKED"
+          echo "Repacked: $REPACKED ($(du -h "$REPACKED" | cut -f1))"
+
+          popd >/dev/null
+          rm -rf "$WORKDIR"
+
+          # Re-sign if a Tauri signing key is configured
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "Re-signing AppImage with Tauri key…"
+            npx --yes @tauri-apps/cli@^2 signer sign \
+              --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
+              --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+              "$REPACKED"
+          fi
+
+          # For tag pushes: re-upload the fixed AppImage to the release
+          # (overwrites the original that tauri-action uploaded)
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            echo "Uploading fixed AppImage to release ${GITHUB_REF_NAME}…"
+            gh release upload "${GITHUB_REF_NAME}" "$REPACKED" \
+              ${TAURI_SIGNING_PRIVATE_KEY:+--clobber} || true
+            # Also upload the .sig if it was generated
+            [ -f "$REPACKED.sig" ] && \
+              gh release upload "${GITHUB_REF_NAME}" "$REPACKED.sig" --clobber || true
+          fi
+
       - name: Upload installer artifacts (manual runs)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
