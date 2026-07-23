@@ -3,6 +3,91 @@
 All notable changes to Eaon are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/) — newest release on top.
 
+## [2026.4.0] — 2026-07-22
+
+*Windows/Linux app only.*
+
+### Changed
+- The Windows and Linux app has been rebuilt from scratch on a cleaner
+  foundation — same Tauri (Rust core + web UI) approach as 2026.3.x, same
+  data on disk (existing installs migrate in place, no lost chats or
+  settings), but a reorganized codebase: no more 1,700-line files, every
+  Settings page is its own component, and BYOK connections now support
+  three wire formats instead of one.
+- **BYOK providers can now speak Anthropic Messages and Google Gemini
+  natively**, not just OpenAI-compatible — paste a Claude or Gemini key
+  directly instead of routing it through a compatibility shim.
+- The hosted service is addressed as "Eaon" everywhere in the app; no
+  leftover "Aqua" labels remain in Settings, onboarding, or the model
+  picker.
+- The chat streaming layer, agent tool safety model, MCP client, and Local
+  API Server all carry forward unchanged in behavior, each with unit/e2e
+  test coverage (28 Rust tests).
+
+### Added
+- **A real self-updater** — the app checks a signed release manifest on
+  launch and periodically after that; when a newer version is available,
+  Settings → General downloads it with live progress, verifies its
+  signature, installs, and relaunches automatically. Replaces the old
+  "click through to the GitHub releases page" link.
+- **Full Plugins parity for Windows/Linux** — the same 30-service,
+  individually-verified MCP catalog the Mac app ships (GitHub, Stripe,
+  Sentry, Cloudflare, PostHog, Semrush, Linear, Supabase, Render, Neon,
+  Datadog, Resend, Notion, Vercel, LaunchDarkly, Slack, ClickUp, Trello,
+  Airtable, monday.com, Asana, HubSpot, Intercom, Attio, GitLab, PagerDuty,
+  DigitalOcean, Figma, Exa, Apify, Dropbox), reachable from Settings →
+  Plugins, on top of the custom-server-by-URL support that was already
+  there.
+- **OAuth 2.1 sign-in for MCP plugins** — a from-scratch Rust port of the
+  MCP authorization spec (2025-06-18): RFC 9728/8414 discovery, RFC 7591
+  Dynamic Client Registration, PKCE (S256), and a loopback redirect
+  listener, so services like Notion, Vercel, Figma, and Slack connect with
+  a real browser sign-in instead of a pasted token. Falls back to a
+  one-time manual client ID for the handful of services (Slack, Asana,
+  HubSpot, PagerDuty, Dropbox) that don't support self-service client
+  registration, exactly as the Mac app already handles them.
+- Free Week trial support in the Windows/Linux app (start it from
+  onboarding or Settings → Providers → Eaon API), signed with the same
+  per-device HMAC scheme as the Mac app.
+- A hardware-aware Models library: RAM-based fit estimates (Fits well /
+  Might be tight / Too big) before you download a local model, plus
+  per-platform Ollama install guidance (winget on Windows, curl on Linux).
+- Test connection button in Settings → Network — one real HTTPS request
+  through the current route (proxy or direct) with latency on success and
+  the actual failure text otherwise.
+- The Settings close (X) button is gone; the sidebar and Esc do that job —
+  sidebar navigation now correctly leaves Settings from anywhere.
+
+### Fixed
+- Windows installers stay NSIS-only (MSI/WiX rejects the app's CalVer major
+  version) — carried forward and documented in `eaon-tauri/BUILDING.md`
+  alongside the full "how to build the Windows version" walkthrough.
+- The Free Week trial credential was being signed against the wrong host,
+  breaking real (non-catalog) usage; removed the discontinued Fable 5
+  model from the hosted catalog.
+- **MCP catalog services now send their required extra headers** — GitHub's
+  connection was silently dropping `X-MCP-Toolsets`, so it exposed its
+  entire ~90-tool surface instead of the curated repos/issues/PRs set,
+  flooding the model's context. Pinned by a wire-level test.
+- **Custom MCP servers reconnect on launch** — enabled servers now come
+  back by themselves at startup (same as catalog plugins), instead of
+  sitting dead until manually reconnected from Settings.
+- **The Plugins page no longer forgets connections** — leaving Settings and
+  coming back showed "Connect" for custom servers that were still connected;
+  connection state now lives in the shared store the whole app reads.
+- **The Local API server survives a relaunch** — with the toggle left on,
+  the listener now restarts on app launch (after the model list loads, so
+  it serves everything); if the port has been taken meanwhile, the toggle
+  turns itself off and says why instead of lying.
+- **Image generation no longer dies on a half-filled provider card** — a
+  connection missing its base URL or model id (e.g. a fresh "Custom"
+  preset) is skipped, falling through to the next complete connection,
+  Eaon's hosted image models, or Ollama; the card itself now says when and
+  why it's being skipped.
+- **Proxy misconfiguration is no longer silent** — an address Rust rejects
+  used to leave traffic on the old route while the field showed the new
+  one; Settings → Network now surfaces the parse error inline.
+
 ## [2026.3.2] — 2026-07-19
 
 ### Added

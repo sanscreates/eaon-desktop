@@ -13,6 +13,12 @@
 # press Publish. A matrix build is the documented tauri-action multi-OS
 # pattern: it creates the release once (keyed on the tag) and each job uploads
 # its own platform's bundles to it.
+#
+# Each build is also signed for the in-app updater (see
+# eaon-tauri/src/core/update.ts and RELEASING-UPDATES.md): tauri-action emits
+# a `latest.json` manifest alongside the installers whenever
+# TAURI_SIGNING_PRIVATE_KEY is set, matching the pubkey pinned in
+# src-tauri/tauri.conf.json (plugins.updater.pubkey).
 name: Release (Windows + Linux)
 
 on:
@@ -86,7 +92,7 @@ jobs:
       # 2026.2.0) so the installer's version matches the release, then let
       # tauri-action build + publish. tauri-action runs the config's
       # beforeBuildCommand (npm run build) and bundles per platform:
-      # NSIS (.exe) + MSI on Windows; .deb + .AppImage on Linux.
+      # NSIS (.exe) on Windows; .deb + .AppImage on Linux.
       - name: Sync version from tag
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: eaon-tauri
@@ -96,11 +102,18 @@ jobs:
           node -e "const fs=require('fs'),p='src-tauri/tauri.conf.json',j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')" "$VERSION"
           echo "Set tauri.conf.json version to $VERSION"
 
+      # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) make tauri-action sign every
+      # bundle for the updater and publish the matching latest.json to the
+      # release — required because tauri.conf.json has
+      # bundle.createUpdaterArtifacts: true. Without these secrets the build
+      # fails outright rather than silently skipping the updater artifacts.
       - name: Build & publish release (tag pushes)
         if: startsWith(github.ref, 'refs/tags/')
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: eaon-tauri
           tagName: ${{ github.ref_name }}
@@ -119,9 +132,15 @@ jobs:
           prerelease: false
 
       # ---- Manual (workflow_dispatch) path: build only, no release ----
+      # Same signing secrets as the tag-push path: createUpdaterArtifacts
+      # makes the bundler require a private key even when it's not
+      # publishing a release, so a manual test build needs them too.
       - name: Build installers only (manual runs)
         if: github.event_name == 'workflow_dispatch'
         uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: eaon-tauri
 
@@ -140,6 +159,10 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         shell: bash
         env:
+          # gh needs an explicit token in a run: step — it isn't inherited
+          # from the job's `permissions:` block the way tauri-action's own
+          # GitHub API calls are.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -214,6 +237,37 @@ jobs:
             # Also upload the .sig if it was generated
             [ -f "$REPACKED.sig" ] && \
               gh release upload "${GITHUB_REF_NAME}" "$REPACKED.sig" --clobber || true
+
+            # latest.json (already published by tauri-action, a few steps
+            # up) still carries the signature it computed for the PRE-repack
+            # AppImage — repacking changes the file's bytes, so that
+            # signature no longer verifies against what's actually on the
+            # release now. Patch just the linux-x86_64 entry with the
+            # signature for the file being shipped, or the in-app updater
+            # permanently fails signature verification for every Linux user.
+            if [ -f "$REPACKED.sig" ]; then
+              MANIFEST_DIR=$(mktemp -d)
+              if gh release download "${GITHUB_REF_NAME}" --pattern latest.json --dir "$MANIFEST_DIR" --clobber 2>/dev/null; then
+                node -e '
+                  const fs = require("fs");
+                  const [manifestPath, sigPath] = process.argv.slice(1);
+                  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+                  const sig = fs.readFileSync(sigPath, "utf8").trim();
+                  const entry = manifest.platforms && manifest.platforms["linux-x86_64"];
+                  if (entry) {
+                    entry.signature = sig;
+                    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+                    console.log("Patched linux-x86_64 signature in latest.json");
+                  } else {
+                    console.log("::warning::latest.json has no linux-x86_64 entry to patch");
+                  }
+                ' "$MANIFEST_DIR/latest.json" "$REPACKED.sig"
+                gh release upload "${GITHUB_REF_NAME}" "$MANIFEST_DIR/latest.json" --clobber
+              else
+                echo "::warning::Couldn't download latest.json to patch its Linux signature"
+              fi
+              rm -rf "$MANIFEST_DIR"
+            fi
           fi
 
       - name: Upload installer artifacts (manual runs)
